@@ -1,0 +1,16 @@
+services:
+  discord-bot:
+    build: .
+    container_name: discord-game-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATA_DIR=/data
+    volumes:
+      - ./data:/data  # Maps your local ./data folder containing db.sqlite into /data
+
+volumes:
+  bot_data:
+    driver: local
+    
