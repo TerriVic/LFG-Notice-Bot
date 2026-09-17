@@ -245,5 +245,5 @@ __marimo__/
 # Custom
 Twitch.txt
 IGDB_Access_Token_Print.py
-
-
+db.sqlite
+.idea
