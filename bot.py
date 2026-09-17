@@ -100,9 +100,14 @@ async def pinggame(interaction: discord.Interaction, game: str):
     mentions = " ".join(f"<@{u[0]}>" for u in users)
     await interaction.response.send_message(f"Players interested in **{game}**: {mentions}")
 
-@tree.command(name="showsubscribers", description="View all users subscribed to a game without pinging them")
+@tree.command(name="showsubscribers", description="View all users in this server subscribed to a game without pinging them")
 @app_commands.autocomplete(game=autocomplete_games)
 async def showsubscribers(interaction: discord.Interaction, game: str, public: bool = False):
+    # Ensure this command is run inside a server
+    if not interaction.guild:
+        await interaction.response.send_message("This command can only be used inside a server.", ephemeral=True)
+        return
+
     cursor.execute("SELECT id FROM igdb_games WHERE name = ?", (game,))
     row = cursor.fetchone()
 
@@ -119,11 +124,26 @@ async def showsubscribers(interaction: discord.Interaction, game: str, public: b
         await interaction.response.send_message(f"No subscribers for **{game}**.", ephemeral=not public)
         return
 
-    mentions = " ".join(f"<@{u[0]}>" for u in users)
+    # Filter: Keep ONLY users who are currently members of this server
+    local_mentions = []
+    for u in users:
+        user_id = u[0]
+        member = interaction.guild.get_member(user_id)
+        if member:
+            local_mentions.append(f"<@{user_id}>")
+
+    if not local_mentions:
+        await interaction.response.send_message(
+            f"No users in **{interaction.guild.name}** are subscribed to **{game}**.",
+            ephemeral=not public
+        )
+        return
+
+    mentions = " ".join(local_mentions)
 
     await interaction.response.send_message(
-        f"Players interested in **{game}** ({len(users)}):\n{mentions}",
-        ephemeral=not public,
+        f"Players in this server interested in **{game}** ({len(local_mentions)}):\n{mentions}",
+        ephemeral=ephemeral,
         allowed_mentions=discord.AllowedMentions.none()
     )
 
