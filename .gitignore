@@ -241,9 +241,19 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+IGDB_*
+# Database & persistent volume data
+*.sqlite
+*.db
+/data/
 
-# Custom
+# IDE configurations
+.idea/
+.vscode/
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+
+# Temporary text logs / tokens
 Twitch.txt
-IGDB_Access_Token_Print.py
-db.sqlite
-.idea

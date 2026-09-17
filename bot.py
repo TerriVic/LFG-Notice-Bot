@@ -9,25 +9,61 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv()
 
-# Retrieve the token safely
 TOKEN = os.getenv("DISCORD_TOKEN")
 
+# Setup persistent data path (defaults to current dir if DATA_DIR isn't set)
+DATA_DIR = os.getenv("DATA_DIR", ".")
+DB_PATH = os.path.join(DATA_DIR, "db.sqlite")
+
+# Ensure the data directory exists before opening SQLite
+os.makedirs(DATA_DIR, exist_ok=True)
+
 intents = discord.Intents.default()
+intents.message_content = True
 intents.guilds = True
 intents.members = True
+bot = commands.Bot(command_prefix="!", intents=intents)
 
+def init_db():
+    """Ensures all required SQLite tables exist before any queries or tasks run."""
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+
+        # Table 1: Cached IGDB Games (including updated_at for incremental syncing)
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS igdb_games (
+                                                                 id INTEGER PRIMARY KEY,
+                                                                 name TEXT NOT NULL,
+                                                                 updated_at INTEGER
+                       );
+                       """)
+
+        # Table 2: User Game Subscriptions
+        cursor.execute("""
+                       CREATE TABLE IF NOT EXISTS subscriptions (
+                                                                    user_id INTEGER NOT NULL,
+                                                                    game_id INTEGER NOT NULL,
+                                                                    UNIQUE(user_id, game_id)
+                       );
+                       """)
+        conn.commit()
+    print("[DB Setup] Database schema initialized with updated_at column.")
 
 # Custom Bot subclass to cleanly initialize tasks and command syncs
 class GameBot(commands.Bot):
     async def setup_hook(self):
         # Start background tasks safely after the event loop is active
+        # 1. Guarantee DB schema exists BEFORE background tasks run
+        init_db()
+
+        # 2. Start background tasks safely after the event loop is active
         if not update_igdb_catalog.is_running():
             update_igdb_catalog.start()
 
-        # Global command sync
+        # 3. Global command sync
         synced = await self.tree.sync()
         print(f"Synced {len(synced)} global command(s)")
 
@@ -35,7 +71,7 @@ class GameBot(commands.Bot):
 client = GameBot(command_prefix="!", intents=intents)
 tree = client.tree
 
-db = sqlite3.connect("db.sqlite")
+db = sqlite3.connect(DB_PATH)
 cursor = db.cursor()
 
 
@@ -55,7 +91,7 @@ async def update_igdb_catalog():
         "Authorization": f"Bearer {access_token}"
     }
 
-    async with aiosqlite.connect("db.sqlite") as db_async:
+    async with aiosqlite.connect(DB_PATH) as db_async:
         # 1. Fetch the max updated_at timestamp from local DB
         async with db_async.execute("SELECT MAX(updated_at) FROM igdb_games") as async_cursor:
             row = await async_cursor.fetchone()
@@ -401,9 +437,10 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 @client.event
 async def on_ready():
-    synced = await tree.sync()  # Syncing with no guild argument syncs globally
-    print(f"Synced {len(synced)} global command(s)")
     print(f"Logged in as {client.user}")
+
+
+client.run(TOKEN)
     
 
 #-------for test server---------
