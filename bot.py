@@ -100,9 +100,11 @@ async def pinggame(interaction: discord.Interaction, game: str):
     mentions = " ".join(f"<@{u[0]}>" for u in users)
     await interaction.response.send_message(f"Players interested in **{game}**: {mentions}")
 
-@tree.command(name="mysubscriptions", description="List all games you are subscribed to")
-@app_commands.describe(public="Set to True to share your subscription list publicly in channel (default: False)")
-async def mysubscriptions(interaction: discord.Interaction, public: bool = False):
+@tree.command(name="usersubscriptions", description="View subscriptions for yourself (default) or another user.")
+async def usersubscriptions(interaction: discord.Interaction, user: discord.User = None, public: bool = False):
+    # Default to the command caller if no user was provided
+    target_user = user or interaction.user
+
     cursor.execute(
         """
         SELECT g.name
@@ -111,23 +113,28 @@ async def mysubscriptions(interaction: discord.Interaction, public: bool = False
         WHERE s.user_id = ?
         ORDER BY g.name ASC
         """,
-        (interaction.user.id,)
+        (target_user.id,)
     )
     rows = cursor.fetchall()
 
+    # Determine pronoun/name framing for the header
+    if target_user.id == interaction.user.id:
+        header = "Your subscribed games"
+        empty_msg = "You are not subscribed to any games."
+    else:
+        header = f"Subscribed games for **{target_user.display_name}**"
+        empty_msg = f"**{target_user.display_name}** is not subscribed to any games."
+
     if not rows:
-        await interaction.response.send_message(
-            "You aren't subscribed to any games yet.",
-            ephemeral=not public
-        )
+        await interaction.response.send_message(empty_msg, ephemeral=True)
         return
 
     game_list = "\n".join(f"• {row[0]}" for row in rows)
-    message = f"**Your Subscribed Games:**\n{game_list}"
 
-    # If public is False, ephemeral will be True (private message)
-    # If public is True, ephemeral will be False (public message)
-    await interaction.response.send_message(message, ephemeral=not public)
+    await interaction.response.send_message(
+        f"**{header}** ({len(rows)}):\n{game_list}",
+        ephemeral=not public
+    )
 
 @tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
