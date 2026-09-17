@@ -143,7 +143,7 @@ async def showsubscribers(interaction: discord.Interaction, game: str, public: b
 
     await interaction.response.send_message(
         f"Players in this server interested in **{game}** ({len(local_mentions)}):\n{mentions}",
-        ephemeral=ephemeral,
+        ephemeral=not public,
         allowed_mentions=discord.AllowedMentions.none()
     )
 
