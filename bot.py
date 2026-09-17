@@ -46,14 +46,29 @@ async def subscribe(interaction: discord.Interaction, game: str):
 
     game_id = row[0]
 
+    # Check if subscription already exists
     cursor.execute(
-        "INSERT OR IGNORE INTO subscriptions (user_id, game_id) VALUES (?, ?)",
+        "SELECT 1 FROM subscriptions WHERE user_id = ? AND game_id = ?",
+        (interaction.user.id, game_id)
+    )
+    existing = cursor.fetchone()
+
+    if existing:
+        await interaction.response.send_message(
+            f"You are already subscribed to **{game}**!",
+            ephemeral=True
+        )
+        return
+
+    # Add the subscription
+    cursor.execute(
+        "INSERT INTO subscriptions (user_id, game_id) VALUES (?, ?)",
         (interaction.user.id, game_id)
     )
     db.commit()
 
-    # ephemeral=True keeps this message private to the user
     await interaction.response.send_message(f"You subscribed to **{game}**", ephemeral=True)
+
 
 @tree.command(name="unsubscribe", description="Unsubscribe from a game")
 @app_commands.autocomplete(game=autocomplete_games)
@@ -67,13 +82,27 @@ async def unsubscribe(interaction: discord.Interaction, game: str):
 
     game_id = row[0]
 
+    # Check if the subscription actually exists
+    cursor.execute(
+        "SELECT 1 FROM subscriptions WHERE user_id = ? AND game_id = ?",
+        (interaction.user.id, game_id)
+    )
+    existing = cursor.fetchone()
+
+    if not existing:
+        await interaction.response.send_message(
+            f"You aren't subscribed to **{game}**.",
+            ephemeral=True
+        )
+        return
+
+    # Remove the subscription
     cursor.execute(
         "DELETE FROM subscriptions WHERE user_id = ? AND game_id = ?",
         (interaction.user.id, game_id)
     )
     db.commit()
 
-    # ephemeral=True keeps this message private to the user
     await interaction.response.send_message(f"You unsubscribed from **{game}**", ephemeral=True)
 
 @tree.command(name="pinggame", description="Ping all users subscribed to a game")
