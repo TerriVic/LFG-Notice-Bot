@@ -34,7 +34,6 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
         for row in rows
     ]
 
-
 @tree.command(name="subscribe", description="Subscribe to a game")
 @app_commands.autocomplete(game=autocomplete_games)
 async def subscribe(interaction: discord.Interaction, game: str):
@@ -42,7 +41,7 @@ async def subscribe(interaction: discord.Interaction, game: str):
     row = cursor.fetchone()
 
     if not row:
-        await interaction.response.send_message("Game not found.")
+        await interaction.response.send_message("Game not found.", ephemeral=True)
         return
 
     game_id = row[0]
@@ -53,29 +52,29 @@ async def subscribe(interaction: discord.Interaction, game: str):
     )
     db.commit()
 
-    await interaction.response.send_message(f"You subscribed to **{game}**")
+    # ephemeral=True keeps this message private to the user
+    await interaction.response.send_message(f"You subscribed to **{game}**", ephemeral=True)
 
 @tree.command(name="unsubscribe", description="Unsubscribe from a game")
 @app_commands.autocomplete(game=autocomplete_games)
 async def unsubscribe(interaction: discord.Interaction, game: str):
-    # Convert game name → IGDB ID
     cursor.execute("SELECT id FROM igdb_games WHERE name = ?", (game,))
     row = cursor.fetchone()
 
     if not row:
-        await interaction.response.send_message("Game not found.")
+        await interaction.response.send_message("Game not found.", ephemeral=True)
         return
 
     game_id = row[0]
 
-    # Delete using the IGDB ID
     cursor.execute(
         "DELETE FROM subscriptions WHERE user_id = ? AND game_id = ?",
         (interaction.user.id, game_id)
     )
     db.commit()
 
-    await interaction.response.send_message(f"You unsubscribed from **{game}**")
+    # ephemeral=True keeps this message private to the user
+    await interaction.response.send_message(f"You unsubscribed from **{game}**", ephemeral=True)
 
 @tree.command(name="pinggame", description="Ping all users subscribed to a game")
 @app_commands.checks.cooldown(1, 30.0)  # 1 use every 30 seconds per user
@@ -122,15 +121,16 @@ async def on_ready():
     
 
 #-------for test server---------
-        
+
+## GUILD_ID = os.getenv("GUILD_ID")
 ##@client.event
 ##async def on_ready():
-##    guild = discord.Object(id=863692047860105216)
+##    guild = discord.Object(id=GUILD_ID)
 ##
 ##    tree.copy_global_to(guild=guild)  # Copies definitions to the guild
 ##
 ##    synced = await tree.sync(guild=guild)
-##    print(f"Synced {len(synced)} commands to guild {863692047860105216}")
+##    print(f"Synced {len(synced)} commands to guild {GUILD_ID}")
 ##    print(f"Logged in as {client.user}")
 
 client.run(TOKEN)
