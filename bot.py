@@ -100,6 +100,33 @@ async def pinggame(interaction: discord.Interaction, game: str):
     mentions = " ".join(f"<@{u[0]}>" for u in users)
     await interaction.response.send_message(f"Players interested in **{game}**: {mentions}")
 
+@tree.command(name="showsubscribers", description="View all users subscribed to a game without pinging them")
+@app_commands.autocomplete(game=autocomplete_games)
+async def showsubscribers(interaction: discord.Interaction, game: str, public: bool = False):
+    cursor.execute("SELECT id FROM igdb_games WHERE name = ?", (game,))
+    row = cursor.fetchone()
+
+    if not row:
+        await interaction.response.send_message("Game not found.", ephemeral=True)
+        return
+
+    game_id = row[0]
+
+    cursor.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,))
+    users = cursor.fetchall()
+
+    if not users:
+        await interaction.response.send_message(f"No subscribers for **{game}**.", ephemeral=not public)
+        return
+
+    mentions = " ".join(f"<@{u[0]}>" for u in users)
+
+    await interaction.response.send_message(
+        f"Players interested in **{game}** ({len(users)}):\n{mentions}",
+        ephemeral=not public,
+        allowed_mentions=discord.AllowedMentions.none()
+    )
+
 @tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     # Unwrap original command errors if wrapped
