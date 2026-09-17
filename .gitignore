@@ -242,6 +242,8 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# Custom
 Twitch.txt
 IGDB_Access_Token_Print.py
-.env
+
+
