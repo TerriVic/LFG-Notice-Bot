@@ -34,6 +34,32 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
         for row in rows
     ]
 
+async def autocomplete_user_subscriptions(interaction: discord.Interaction, current: str):
+    cursor.execute(
+        """
+        SELECT g.name
+        FROM subscriptions s
+                 JOIN igdb_games g ON s.game_id = g.id
+        WHERE s.user_id = ? AND g.name LIKE ?
+        LIMIT 25
+        """,
+        (interaction.user.id, f"%{current}%")
+    )
+    rows = cursor.fetchall()
+
+    if not rows:
+        return [
+            app_commands.Choice(
+                name="No subscribed games found",
+                value="__NONE__"
+            )
+        ]
+
+    return [
+        app_commands.Choice(name=row[0], value=row[0])
+        for row in rows
+    ]
+
 @tree.command(name="subscribe", description="Subscribe to a game")
 @app_commands.autocomplete(game=autocomplete_games)
 async def subscribe(interaction: discord.Interaction, game: str):
@@ -71,8 +97,17 @@ async def subscribe(interaction: discord.Interaction, game: str):
 
 
 @tree.command(name="unsubscribe", description="Unsubscribe from a game")
-@app_commands.autocomplete(game=autocomplete_games)
+@app_commands.autocomplete(game=autocomplete_user_subscriptions)
 async def unsubscribe(interaction: discord.Interaction, game: str):
+    # Handle the dummy autocomplete choice
+    if game == "__NONE__":
+        await interaction.response.send_message(
+            "You are not subscribed to any games.",
+            ephemeral=True
+        )
+        return
+
+    # Get game ID
     cursor.execute("SELECT id FROM igdb_games WHERE name = ?", (game,))
     row = cursor.fetchone()
 
@@ -82,21 +117,7 @@ async def unsubscribe(interaction: discord.Interaction, game: str):
 
     game_id = row[0]
 
-    # Check if the subscription actually exists
-    cursor.execute(
-        "SELECT 1 FROM subscriptions WHERE user_id = ? AND game_id = ?",
-        (interaction.user.id, game_id)
-    )
-    existing = cursor.fetchone()
-
-    if not existing:
-        await interaction.response.send_message(
-            f"You aren't subscribed to **{game}**.",
-            ephemeral=True
-        )
-        return
-
-    # Remove the subscription
+    # Directly delete the subscription (redundant existence check removed)
     cursor.execute(
         "DELETE FROM subscriptions WHERE user_id = ? AND game_id = ?",
         (interaction.user.id, game_id)
