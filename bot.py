@@ -100,6 +100,35 @@ async def pinggame(interaction: discord.Interaction, game: str):
     mentions = " ".join(f"<@{u[0]}>" for u in users)
     await interaction.response.send_message(f"Players interested in **{game}**: {mentions}")
 
+@tree.command(name="mysubscriptions", description="List all games you are subscribed to")
+@app_commands.describe(public="Set to True to share your subscription list publicly in channel (default: False)")
+async def mysubscriptions(interaction: discord.Interaction, public: bool = False):
+    cursor.execute(
+        """
+        SELECT g.name
+        FROM subscriptions s
+                 JOIN igdb_games g ON s.game_id = g.id
+        WHERE s.user_id = ?
+        ORDER BY g.name ASC
+        """,
+        (interaction.user.id,)
+    )
+    rows = cursor.fetchall()
+
+    if not rows:
+        await interaction.response.send_message(
+            "You aren't subscribed to any games yet.",
+            ephemeral=not public
+        )
+        return
+
+    game_list = "\n".join(f"• {row[0]}" for row in rows)
+    message = f"**Your Subscribed Games:**\n{game_list}"
+
+    # If public is False, ephemeral will be True (private message)
+    # If public is True, ephemeral will be False (public message)
+    await interaction.response.send_message(message, ephemeral=not public)
+
 @tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     # Unwrap original command errors if wrapped
