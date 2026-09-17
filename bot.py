@@ -175,7 +175,7 @@ async def usersubscriptions(interaction: discord.Interaction, user: discord.User
         empty_msg = f"**{target_user.display_name}** is not subscribed to any games."
 
     if not rows:
-        await interaction.response.send_message(empty_msg, ephemeral=True)
+        await interaction.response.send_message(empty_msg, ephemeral=not public)
         return
 
     game_list = "\n".join(f"• {row[0]}" for row in rows)
