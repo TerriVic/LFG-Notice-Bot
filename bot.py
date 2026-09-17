@@ -185,6 +185,53 @@ async def usersubscriptions(interaction: discord.Interaction, user: discord.User
         ephemeral=not public
     )
 
+@tree.command(name="showsubscribers", description="View all users in this server subscribed to a game without pinging them")
+@app_commands.autocomplete(game=autocomplete_games)
+async def showsubscribers(interaction: discord.Interaction, game: str, public: bool = False):
+    # Ensure this command is run inside a server
+    if not interaction.guild:
+        await interaction.response.send_message("This command can only be used inside a server.", ephemeral=True)
+        return
+
+    cursor.execute("SELECT id FROM igdb_games WHERE name = ?", (game,))
+    row = cursor.fetchone()
+
+    if not row:
+        await interaction.response.send_message("Game not found.", ephemeral=True)
+        return
+
+    game_id = row[0]
+
+    cursor.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,))
+    users = cursor.fetchall()
+
+    if not users:
+        await interaction.response.send_message(f"No subscribers for **{game}**.", ephemeral=not public)
+        return
+
+    # Filter: Keep ONLY users who are currently members of this server
+    local_mentions = []
+    for u in users:
+        user_id = u[0]
+        member = interaction.guild.get_member(user_id)
+        if member:
+            local_mentions.append(f"<@{user_id}>")
+
+    if not local_mentions:
+        await interaction.response.send_message(
+            f"No users in **{interaction.guild.name}** are subscribed to **{game}**.",
+            ephemeral=not public
+        )
+        return
+
+    mentions = " ".join(local_mentions)
+
+    await interaction.response.send_message(
+        f"Players in this server interested in **{game}** ({len(local_mentions)}):\n{mentions}",
+        ephemeral=not public,
+        allowed_mentions=discord.AllowedMentions.none()
+    )
+
 @tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     # Unwrap original command errors if wrapped
