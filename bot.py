@@ -306,6 +306,63 @@ class ConfirmDataDeletionView(discord.ui.View):
             view=self
         )
 
+@tree.command(name="top_games", description="Show the top games on the server by subscription count")
+@app_commands.describe(
+    limit="Number of top games to display (default: 10, max: 25)",
+    public="Set to True to share the list publicly in channel (default: False)"
+)
+async def top_games(interaction: discord.Interaction, limit: int = 10, public: bool = False):
+    # Guild check
+    if not interaction.guild:
+        await interaction.response.send_message("This command can only be used inside a server.", ephemeral=True)
+        return
+
+    # Cap the maximum limit to prevent huge wall-of-text messages
+    limit = max(1, min(limit, 25))
+
+    # Fetch all subscriptions joined with game names
+    cursor.execute(
+        """
+        SELECT s.user_id, g.name
+        FROM subscriptions s
+                 JOIN igdb_games g ON s.game_id = g.id
+        """
+    )
+    rows = cursor.fetchall()
+
+    if not rows:
+        await interaction.response.send_message("There are no active subscriptions in this server.", ephemeral=not public)
+        return
+
+    # Count subscriptions per game for members present in this guild
+    game_counts = {}
+    for user_id, game_name in rows:
+        if interaction.guild.get_member(user_id):
+            game_counts[game_name] = game_counts.get(game_name, 0) + 1
+
+    if not game_counts:
+        await interaction.response.send_message("No members in this server are currently subscribed to any games.", ephemeral=not public)
+        return
+
+    # Sort games by subscriber count in descending order
+    sorted_games = sorted(game_counts.items(), key=lambda x: x[1], reverse=True)[:limit]
+
+    # Format output message with numbers
+    formatted_list = []
+
+    for idx, (game_name, count) in enumerate(sorted_games):
+        rank_icon = f"`#{idx + 1}`"
+        sub_label = "subscriber" if count == 1 else "subscribers"
+        formatted_list.append(f"{rank_icon} **{game_name}** — {count} {sub_label}")
+
+    embed = discord.Embed(
+        title=f"Top {len(sorted_games)} Games in {interaction.guild.name}",
+        description="\n".join(formatted_list),
+        color=discord.Color.gold()
+    )
+
+    await interaction.response.send_message(embed=embed, ephemeral=not public)
+
 @tree.command(name="subscribe", description="Subscribe to a game")
 @app_commands.autocomplete(game=autocomplete_games)
 async def subscribe(interaction: discord.Interaction, game: str):
@@ -546,7 +603,4 @@ client.run(TOKEN)
 ##    synced = await tree.sync(guild=guild)
 ##    print(f"Synced {len(synced)} commands to guild {GUILD_ID}")
 ##    print(f"Logged in as {client.user}")
-
-client.run(TOKEN)
-
-
+## client.run(TOKEN)
