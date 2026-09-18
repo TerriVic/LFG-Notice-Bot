@@ -74,6 +74,41 @@ tree = client.tree
 db = sqlite3.connect(DB_PATH)
 cursor = db.cursor()
 
+class HelpSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Subscriptions", description="Subscribe, unsubscribe, and view games", emoji="🎮"),
+            discord.SelectOption(label="Pings & LFG", description="Find players and notify subscribers", emoji="🔔"),
+            discord.SelectOption(label="Privacy & Data", description="Manage your stored user data", emoji="🔒"),
+        ]
+        super().__init__(placeholder="Choose a command category...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "Subscriptions":
+            embed = discord.Embed(title="🎮 Subscription Commands", color=discord.Color.blue())
+            embed.add_field(name="/subscribe <game>", value="Subscribe to pings for a specific game.", inline=False)
+            embed.add_field(name="/unsubscribe <game>", value="Remove your subscription to a game.", inline=False)
+            embed.add_field(name="/usersubscriptions", value="View your active game subscriptions.", inline=False)
+
+        elif self.values[0] == "Pings & LFG":
+            embed = discord.Embed(title="🔔 Ping & LFG Commands", color=discord.Color.green())
+            embed.add_field(name="/pinggame <game>", value="Ping everyone subscribed to a game.", inline=False)
+            embed.add_field(name="/showsubscribers <game>", value="See who is subscribed without pinging.", inline=False)
+
+        elif self.values[0] == "Privacy & Data":
+            embed = discord.Embed(title="🔒 Privacy & Data Commands", color=discord.Color.red())
+            embed.add_field(
+                name="/delete_my_data",
+                value="Permanently delete all your subscriptions and user data from the bot's database.",
+                inline=False
+            )
+
+        await interaction.response.edit_message(embed=embed)
+
+class HelpView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+        self.add_item(HelpSelect())
 
 @tasks.loop(hours=168)  # Runs automatically every 7 days
 async def update_igdb_catalog():
@@ -467,6 +502,15 @@ async def delete_my_data(interaction: discord.Interaction):
         view=view,
         ephemeral=True
     )
+
+@tree.command(name="help", description="Learn how to use the LFG Notice Bot")
+async def help_command(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="LFG Notice Bot Help",
+        description="Select a category below to view detailed command guides.",
+        color=discord.Color.blurple()
+    )
+    await interaction.response.send_message(embed=embed, view=HelpView(), ephemeral=True)
 
 @tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
