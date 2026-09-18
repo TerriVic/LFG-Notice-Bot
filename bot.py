@@ -68,11 +68,10 @@ def init_db():
         if "version_parent_id" not in columns:
             cursor.execute("ALTER TABLE igdb_games ADD COLUMN version_parent_id INTEGER DEFAULT NULL;")
 
-        # Purge non-base games, parent-linked games, and special edition versions
+        # Retain Main Games (0), DLCs/Addons (1), Expansions (2), Remakes/Remasters (8, 9, 10, 11)
         cursor.execute("""
             DELETE FROM igdb_games 
-            WHERE category NOT IN (0, 8, 9, 10, 11) 
-               OR parent_game_id IS NOT NULL
+            WHERE category NOT IN (0, 1, 2, 8, 9, 10, 11) 
                OR version_parent_id IS NOT NULL;
         """)
 
@@ -177,7 +176,7 @@ async def update_igdb_catalog():
                 # Filter BOTH parent_game AND version_parent directly in the API query
                 body = (
                     f"fields id, name, updated_at, first_release_date, category, version_parent, parent_game; "
-                    f"where id > {last_id} & parent_game = null & version_parent = null; "
+                    f"where id > {last_id} & version_parent = null; "
                     f"sort id asc; "
                     f"limit {limit};"
                 )
@@ -199,7 +198,8 @@ async def update_igdb_catalog():
 
                 last_id = games[-1]["id"]
 
-                valid_categories = {0, 8, 9, 10, 11}
+                # Allow Main Game (0), DLC (1), Expansion (2), Remaster/Remake (8, 9, 10, 11)
+                valid_categories = {0, 1, 2, 8, 9, 10, 11}
                 filtered_games = [
                     g for g in games
                     if (g.get("category") in valid_categories or g.get("category") is None)
@@ -219,7 +219,7 @@ async def update_igdb_catalog():
                         g.get("updated_at", int(time.time())),
                         g.get("first_release_date"),
                         g.get("category", 0),
-                        None,
+                        g.get("parent_game"),
                         None
                     ))
 
@@ -251,9 +251,10 @@ async def before_catalog_update():
     await client.wait_until_ready()
 
 async def autocomplete_games(interaction: discord.Interaction, current: str):
+    clean_current = current.strip()
+
     async with aiosqlite.connect(DB_PATH) as db_async:
-        if not current.strip():
-            # Show recent base games when input is empty
+        if not clean_current:
             async with db_async.execute(
                     """
                     SELECT name, first_release_date, COUNT(*) OVER (PARTITION BY name) as name_count
@@ -265,7 +266,9 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
             ) as async_cursor:
                 rows = await async_cursor.fetchall()
         else:
-            # Search database: Prioritize prefix matches, then release date and length
+            # 1. Exact match tiering guarantees base titles aren't squeezed out
+            # 2. Starts-with match comes next
+            # 3. Contains match comes last
             async with db_async.execute(
                     """
                     SELECT name, first_release_date, COUNT(*) OVER (PARTITION BY name) as name_count
@@ -274,15 +277,15 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                     GROUP BY name
                     ORDER BY
                         CASE
-                            WHEN name LIKE ? THEN 1
-                            ELSE 2
+                            WHEN LOWER(name) = LOWER(?) THEN 1
+                            WHEN name LIKE ? THEN 2
+                            ELSE 3
                             END,
-                        first_release_date DESC,
                         LENGTH(name) ASC,
-                        name ASC
+                        first_release_date ASC
                     LIMIT 25
                     """,
-                    (f"%{current}%", f"{current}%")
+                    (f"%{clean_current}%", clean_current, f"{clean_current}%")
             ) as async_cursor:
                 rows = await async_cursor.fetchall()
 
@@ -302,7 +305,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
             )
         )
 
-    # Sort the 25 relevant choices alphabetically (A-Z, case-insensitive)
+    # Sort retrieved items alphabetically (A-Z)
     choices.sort(key=lambda choice: choice.name.lower())
 
     return choices
