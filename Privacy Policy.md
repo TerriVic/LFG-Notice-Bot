@@ -23,7 +23,7 @@ Stored data is used exclusively to:
 
 ## 4. Data Retention & Removal
 * **Self-Service Removal:** Running `/unsubscribe` for a game immediately deletes that subscription entry from the database.
-* **Full Data Deletion:** If you wish to have all your data deleted from the bot's database, use the command `/delete_my_data` or contact the bot administrator.
+* **Full Data Deletion:** If you wish to have all your data deleted from the bot's database, use the command `/delete_my_data`.
 
 ## 5. Contact
 If you have questions or privacy concerns regarding LFG Notice Bot, please contact the bot developer or server administrator.
