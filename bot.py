@@ -234,6 +234,43 @@ async def fetch_and_cache_game_from_igdb(game_name: str) -> tuple[int, str] | No
 
     return game_id, official_name
 
+class ConfirmDataDeletionView(discord.ui.View):
+    def __init__(self, target_user_id: int):
+        super().__init__(timeout=30.0)  # Auto-expire buttons after 30 seconds
+        self.target_user_id = target_user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Ensures only the user who ran the command can press the buttons
+        if interaction.user.id != self.target_user_id:
+            await interaction.response.send_message("You cannot use these buttons.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm Deletion", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 1. Execute deletion query
+        cursor.execute("DELETE FROM subscriptions WHERE user_id = ?", (interaction.user.id,))
+        db.commit()
+
+        # 2. Disable buttons and inform the user
+        for child in self.children:
+            child.disabled = True
+
+        await interaction.response.edit_message(
+            content="**All your data has been permanently deleted from our database.**",
+            view=self
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+
+        await interaction.response.edit_message(
+            content="Action canceled. Your data gets to live another day.",
+            view=self
+        )
+
 @tree.command(name="subscribe", description="Subscribe to a game")
 @app_commands.autocomplete(game=autocomplete_games)
 async def subscribe(interaction: discord.Interaction, game: str):
@@ -419,6 +456,16 @@ async def showsubscribers(interaction: discord.Interaction, game: str, public: b
         f"Players in this server interested in **{game}** ({len(local_mentions)}):\n{mentions}",
         ephemeral=not public,
         allowed_mentions=discord.AllowedMentions.none()
+    )
+
+@tree.command(name="delete_my_data", description="Permanently delete all your subscription data from the bot")
+async def delete_my_data(interaction: discord.Interaction):
+    view = ConfirmDataDeletionView(target_user_id=interaction.user.id)
+    await interaction.response.send_message(
+        "⚠️ **Are you sure you want to delete all your data?**\n"
+        "This will immediately remove all your active game subscriptions.",
+        view=view,
+        ephemeral=True
     )
 
 @tree.error
