@@ -471,6 +471,90 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
     except (discord.NotFound, discord.HTTPException):
         return []
 
+# ---------------------------------------------------------
+# Autocomplete Helper Function
+# ---------------------------------------------------------
+async def game_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    """Fetch up to 25 matching games from the local IGDB database as the user types."""
+    if not current:
+        # Show top matches or empty list when user hasn't typed anything yet
+        cursor.execute("SELECT name FROM igdb_games LIMIT 25")
+    else:
+        # Perform a SQL LIKE query for fuzzy matching
+        cursor.execute(
+            "SELECT name FROM igdb_games WHERE name LIKE ? ORDER BY name ASC LIMIT 25",
+            (f"%{current}%",)
+        )
+
+    results = cursor.fetchall()
+
+    # Return choices formatted for Discord's UI
+    return [
+        app_commands.Choice(name=row[0], value=row[0])
+        for row in results
+    ]
+
+# ---------------------------------------------------------
+# Admin Command Group with Autocomplete
+# ---------------------------------------------------------
+admin_group = app_commands.Group(name="admin", description="Admin-only bot management commands")
+
+@admin_group.command(name="subscribe_user", description="Force-subscribe a user to a game")
+@app_commands.checks.has_permissions(administrator=True)
+async def admin_subscribe(interaction: discord.Interaction, user: discord.User, game: str):
+    cursor.execute("SELECT id, name FROM igdb_games WHERE name = ? COLLATE NOCASE", (game,))
+    game_row = cursor.fetchone()
+
+    if not game_row:
+        await interaction.response.send_message(f"Game '{game}' not found in catalog.", ephemeral=True)
+        return
+
+    game_id, game_name = game_row
+
+    cursor.execute(
+        "INSERT OR IGNORE INTO subscriptions (user_id, game_id) VALUES (?, ?)",
+        (user.id, game_id)
+    )
+    db.commit()
+
+    await interaction.response.send_message(
+        f"✅ Subscribed {user.mention} to **{game_name}**.",
+        ephemeral=True
+    )
+
+# Attach autocomplete to the 'game' parameter of admin_subscribe
+@admin_subscribe.autocomplete('game')
+async def admin_subscribe_game_autocomplete(interaction: discord.Interaction, current: str):
+    return await game_autocomplete(interaction, current)
+
+@admin_group.command(name="unsubscribe_user", description="Force-unsubscribe a user from a game")
+@app_commands.checks.has_permissions(administrator=True)
+async def admin_unsubscribe(interaction: discord.Interaction, user: discord.User, game: str):
+    cursor.execute("SELECT id, name FROM igdb_games WHERE name = ? COLLATE NOCASE", (game,))
+    game_row = cursor.fetchone()
+
+    if not game_row:
+        await interaction.response.send_message(f"Game '{game}' not found in catalog.", ephemeral=True)
+        return
+
+    game_id, game_name = game_row
+
+    cursor.execute("DELETE FROM subscriptions WHERE user_id = ? AND game_id = ?", (user.id, game_id))
+    db.commit()
+
+    await interaction.response.send_message(
+        f"🗑️ Unsubscribed {user.mention} from **{game_name}**.",
+        ephemeral=True
+    )
+
+# Attach autocomplete to the 'game' parameter of admin_unsubscribe
+@admin_unsubscribe.autocomplete('game')
+async def admin_unsubscribe_game_autocomplete(interaction: discord.Interaction, current: str):
+    return await game_autocomplete(interaction, current)
+
+# REGISTRATION: Add the admin command group to the tree
+tree.add_command(admin_group)
+
 async def autocomplete_user_subscriptions(interaction: discord.Interaction, current: str):
     clean_current = current.strip().replace("’", "'").replace("‘", "'")
     async with aiosqlite.connect(DB_PATH) as db:
