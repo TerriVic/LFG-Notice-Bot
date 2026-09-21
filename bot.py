@@ -33,11 +33,23 @@ EDITION_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# GENERIC DLC REGEX: Catches any title with a colon/dash followed by common DLC/expansion keywords
+GENERIC_DLC_PATTERN = re.compile(
+    r'[\:\-\–\—]\s*.*?\b(DLC|Expansion|Pack|Add-on|Season Pass|Bonus Content|Soundtrack|Artbook|Episode|Chapter|Mission|Quest|Map Pack|Skin|Bundle)\b',
+    re.IGNORECASE
+)
+
 def normalize_game_name(name: str) -> str:
     """Strips edition suffixes and trailing punctuation from search terms."""
     clean_name = EDITION_PATTERN.sub('', name)
     clean_name = re.sub(r'[\:\-\–\—\s]+$', '', clean_name)
     return clean_name.strip()
+
+def extract_id(val):
+    """Utility to safely extract ID integer whether IGDB returns int or dict."""
+    if isinstance(val, dict):
+        return val.get("id")
+    return val
 
 def init_db():
     """Ensures required tables and schema setup exist."""
@@ -68,12 +80,26 @@ def init_db():
         if "version_parent_id" not in columns:
             cursor.execute("ALTER TABLE igdb_games ADD COLUMN version_parent_id INTEGER DEFAULT NULL;")
 
-        # Retain Main Games (0), DLCs/Addons (1), Expansions (2), Remakes/Remasters (8, 9, 10, 11)
+        # 1. Retain ONLY Main Games (0), Remakes/Remasters (8, 9, 10, 11)
+        cursor.execute("""
+               DELETE FROM igdb_games
+               WHERE category NOT IN (0, 8, 9, 10, 11)
+               OR version_parent_id IS NOT NULL
+               OR parent_game_id IS NOT NULL;
+        """)
+
+        # 2. Generic SQL Purge for miscategorized IGDB DLC/expansion titles
         cursor.execute("""
             DELETE FROM igdb_games 
-            WHERE category NOT IN (0, 1, 2, 8, 9, 10, 11) 
-               OR version_parent_id IS NOT NULL;
-        """)
+            WHERE name LIKE '%:% DLC%' 
+               OR name LIKE '%-% DLC%'
+               OR name LIKE '%:% Expansion%'
+               OR name LIKE '%-% Expansion%'
+               OR name LIKE '%:% Pack%'
+               OR name LIKE '%-% Pack%'
+               OR name LIKE '%:% Season Pass%'
+               OR name LIKE '%:% Add-on%';
+               """)
 
         # Table 2: User Game Subscriptions
         cursor.execute("""
@@ -84,7 +110,7 @@ def init_db():
             );
         """)
         conn.commit()
-    print("[DB Setup] Database schema initialized.")
+    print("[DB Setup] Database schema initialized and cleaned.")
 
 # Custom Bot subclass to cleanly initialize tasks and command syncs
 class GameBot(commands.Bot):
@@ -176,7 +202,7 @@ async def update_igdb_catalog():
                 # Filter BOTH parent_game AND version_parent directly in the API query
                 body = (
                     f"fields id, name, updated_at, first_release_date, category, version_parent, parent_game; "
-                    f"where id > {last_id} & version_parent = null; "
+                    f"where id > {last_id} & version_parent = null & parent_game = null; "
                     f"sort id asc; "
                     f"limit {limit};"
                 )
@@ -198,29 +224,36 @@ async def update_igdb_catalog():
 
                 last_id = games[-1]["id"]
 
-                # Allow Main Game (0), DLC (1), Expansion (2), Remaster/Remake (8, 9, 10, 11)
-                valid_categories = {0, 1, 2, 8, 9, 10, 11}
-                filtered_games = [
-                    g for g in games
-                    if (g.get("category") in valid_categories or g.get("category") is None)
-                    and g.get("parent_game") is None
-                    and g.get("version_parent") is None
-                ]
+                # Allow Main Game (0), Remaster/Remake (8, 9, 10, 11)
+                valid_categories = {0, 8, 9, 10, 11}
+                filtered_games = []
+
+                for g in games:
+                    cat = g.get("category")
+                    p_game = extract_id(g.get("parent_game"))
+                    v_parent = extract_id(g.get("version_parent"))
+                    g_name = g.get("name", "")
+
+                    if (cat in valid_categories or cat is None) and p_game is None and v_parent is None:
+                        # Generic Regex Check: Skip titles matching DLC/Expansion keywords in subtitles
+                        if GENERIC_DLC_PATTERN.search(g_name):
+                            continue
+                        filtered_games.append((g, p_game, v_parent))
 
                 if not filtered_games:
                     await asyncio.sleep(0.25)
                     continue
 
                 records = []
-                for g in filtered_games:
+                for g, p_game, v_parent in filtered_games:
                     records.append((
                         g["id"],
                         g["name"],
                         g.get("updated_at", int(time.time())),
                         g.get("first_release_date"),
                         g.get("category", 0),
-                        g.get("parent_game"),
-                        None
+                        p_game,
+                        v_parent
                     ))
 
                 await db_async.executemany(
@@ -369,7 +402,11 @@ async def fetch_and_cache_game_from_igdb(game_name: str) -> tuple[int, str] | No
     # Find the first entry that is a true base game
     selected = None
     for item in data:
-        if item.get("parent_game") is None and item.get("version_parent") is None:
+        p_game = extract_id(item.get("parent_game"))
+        v_parent = extract_id(item.get("version_parent"))
+        g_name = item.get("name", "")
+
+        if p_game is None and v_parent is None and not GENERIC_DLC_PATTERN.search(g_name):
             selected = item
             break
 
@@ -380,8 +417,8 @@ async def fetch_and_cache_game_from_igdb(game_name: str) -> tuple[int, str] | No
     official_name = selected["name"]
     category = selected.get("category", 0)
     first_release_date = selected.get("first_release_date")
-    vp = selected.get("version_parent")
-    version_parent_id = vp.get("id") if isinstance(vp, dict) else vp
+    vp = extract_id(selected.get("version_parent"))
+    p_game = extract_id(selected.get("parent_game"))
 
     cursor.execute(
         """
@@ -389,7 +426,7 @@ async def fetch_and_cache_game_from_igdb(game_name: str) -> tuple[int, str] | No
         (id, name, updated_at, first_release_date, category, parent_game_id, version_parent_id) 
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (game_id, official_name, int(time.time()), first_release_date, category, None, version_parent_id)
+        (game_id, official_name, int(time.time()), first_release_date, category, p_game, vp)
     )
     db.commit()
 
