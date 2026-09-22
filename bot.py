@@ -115,7 +115,7 @@ class GameBot(commands.Bot):
         if not update_igdb_catalog.is_running():
             update_igdb_catalog.start()
 
-        # 3. Global command sync
+        # Global command sync
         synced = await self.tree.sync()
         print(f"Synced {len(synced)} global command(s)")
 
@@ -276,19 +276,17 @@ async def before_catalog_update():
     await client.wait_until_ready()
 
 async def autocomplete_games(interaction: discord.Interaction, current: str):
-    # Fix mobile smart quotes
     clean_current = current.strip().replace("’", "'").replace("‘", "'")
 
-    # Detect if user specifically typed a subtitle delimiter or keyword
+    # Detect if user explicitly typed a subtitle delimiter or DLC keyword
     user_explicitly_searching_dlc = any(char in clean_current for char in [":", "-", "–", "—"]) or \
                                     any(k in clean_current.lower() for k in ["dlc", "expansion", "pack"])
 
-    # Extract base search query before delimiter (e.g., "Abiotic Factor: " -> "Abiotic Factor")
     base_search_term = re.split(r'[\:\-\–\—]', clean_current)[0].strip()
 
     choices = []
 
-    # IF USER TYPED A DELIMITER: Bypasses strict database filtering and fetches live from IGDB directly
+    # IF USER TYPED A DELIMITER: Query IGDB live with a strict 1.5-second timeout
     if user_explicitly_searching_dlc and len(base_search_term) > 2:
         client_id = os.getenv("TWITCH_CLIENT_ID")
         access_token = os.getenv("TWITCH_ACCESS_TOKEN")
@@ -298,18 +296,22 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                 "Client-ID": client_id,
                 "Authorization": f"Bearer {access_token}"
             }
-            # Search IGDB directly using the typed prefix
             body = f'fields name; search "{clean_current}"; limit 25;'
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
-                    if resp.status == 200:
-                        igdb_results = await resp.json()
-                        for item in igdb_results:
-                            g_name = item.get("name", "")
-                            choices.append(app_commands.Choice(name=g_name[:100], value=g_name[:100]))
+            try:
+                timeout = aiohttp.ClientTimeout(total=1.5)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
+                        if resp.status == 200:
+                            igdb_results = await resp.json()
+                            for item in igdb_results:
+                                g_name = item.get("name", "")
+                                choices.append(app_commands.Choice(name=g_name[:100], value=g_name[:100]))
+            except Exception:
+                # If IGDB times out or fails, gracefully fall back to local database search below
+                pass
 
-    # STANDARD LOCAL DATABASE SEARCH (Runs when no delimiter is used, or if IGDB API request fails)
+    # STANDARD LOCAL DATABASE SEARCH
     if not choices:
         async with aiosqlite.connect(DB_PATH) as db_async:
             if not clean_current:
@@ -353,7 +355,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
 
             choices.append(app_commands.Choice(name=display_name[:100], value=name[:100]))
 
-    # Deduplicate and sort choices alphabetically
+    # Deduplicate and sort choices
     unique_choices = {choice.name: choice for choice in choices}.values()
     sorted_choices = sorted(list(unique_choices), key=lambda choice: choice.name.lower())
     return sorted_choices[:25]
@@ -521,15 +523,15 @@ async def top_games(interaction: discord.Interaction, limit: int = 10, public: b
     # Cap the maximum limit to prevent huge wall-of-text messages
     limit = max(1, min(limit, 25))
 
-    # Fetch all subscriptions joined with game names
-    cursor.execute(
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
         """
         SELECT s.user_id, g.name
         FROM subscriptions s
                  JOIN igdb_games g ON s.game_id = g.id
         """
-    )
-    rows = cursor.fetchall()
+        ) as cursor:
+            rows = await cursor.fetchall()
 
     if not rows:
         await interaction.response.send_message("There are no active subscriptions in this server.", ephemeral=not public)
@@ -592,19 +594,19 @@ async def subscribe(interaction: discord.Interaction, game: str):
 
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-        "SELECT 1 FROM subscriptions WHERE user_id = ? AND game_id = ?",
-        (interaction.user.id, game_id)
+                "SELECT 1 FROM subscriptions WHERE user_id = ? AND game_id = ?",
+                (interaction.user.id, game_id)
         ) as cursor:
             already_subbed = await cursor.fetchone()
 
         if already_subbed:
             await interaction.followup.send(f"You are already subscribed to **{official_name}**!", ephemeral=True)
-        return
+            return
 
         await db.execute(
-        "INSERT INTO subscriptions (user_id, game_id) VALUES (?, ?)",
-        (interaction.user.id, game_id)
-    )
+            "INSERT INTO subscriptions (user_id, game_id) VALUES (?, ?)",
+            (interaction.user.id, game_id)
+        )
         await db.commit()
 
     await interaction.followup.send(f"You subscribed to **{official_name}**!", ephemeral=True)
@@ -612,7 +614,6 @@ async def subscribe(interaction: discord.Interaction, game: str):
 @tree.command(name="unsubscribe", description="Unsubscribe from a game")
 @app_commands.autocomplete(game=autocomplete_user_subscriptions)
 async def unsubscribe(interaction: discord.Interaction, game: str):
-    # Handle the dummy autocomplete choice
     if game == "__NONE__":
         await interaction.response.send_message(
             "You are not subscribed to any games.",
@@ -625,16 +626,18 @@ async def unsubscribe(interaction: discord.Interaction, game: str):
         async with db.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,)) as cursor:
             row = await cursor.fetchone()
 
+    # Handle missing game
     if not row:
         await interaction.response.send_message("Game not found.", ephemeral=True)
         return
 
-        game_id, official_name = await resolve_to_base_game(row[0], row[1])
+    game_id, official_name = await resolve_to_base_game(row[0], row[1])
 
+    async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-        "DELETE FROM subscriptions WHERE user_id = ? AND game_id = ?",
-        (interaction.user.id, game_id)
-    )
+            "DELETE FROM subscriptions WHERE user_id = ? AND game_id = ?",
+            (interaction.user.id, game_id)
+        )
         await db.commit()
 
     await interaction.response.send_message(f"You unsubscribed from **{official_name}**", ephemeral=True)
@@ -652,10 +655,10 @@ async def pinggame(interaction: discord.Interaction, game: str):
         await interaction.response.send_message("Game not found.")
         return
 
-        game_id, official_name = await resolve_to_base_game(row[0], row[1])
+    game_id, official_name = await resolve_to_base_game(row[0], row[1])
 
-        async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
-            users = await cursor.fetchall()
+    async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
+        users = await cursor.fetchall()
 
     if not users:
         await interaction.response.send_message(f"No subscribers for **{official_name}**.")
@@ -717,10 +720,10 @@ async def showsubscribers(interaction: discord.Interaction, game: str, public: b
         await interaction.response.send_message("Game not found.", ephemeral=True)
         return
 
-        game_id, official_name = await resolve_to_base_game(row[0], row[1])
+    game_id, official_name = await resolve_to_base_game(row[0], row[1])
 
-        async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
-            users = await cursor.fetchall()
+    async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
+        users = await cursor.fetchall()
 
     if not users:
         await interaction.response.send_message(f"No subscribers for **{official_name}**.", ephemeral=not public)
