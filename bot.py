@@ -1,14 +1,13 @@
 import os
-import sqlite3
 import time
 import asyncio
+import re
 import aiohttp
 import aiosqlite
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
-import re
 
 # Load environment variables
 load_dotenv()
@@ -27,7 +26,7 @@ intents.message_content = True
 intents.guilds = True
 intents.members = True
 
-# Regex pattern for searching/matching fallback games
+# Regex patterns
 EDITION_PATTERN = re.compile(
     r'[\:\-\–\—\s]*\b(Game of the Year|GOTY|Ultimate|Deluxe|Collector\'s|Enhanced|Definitive|Gold|Complete|Special|Remastered|Edition|Director\'s Cut)\b.*$',
     re.IGNORECASE
@@ -52,12 +51,10 @@ def extract_id(val):
         return val.get("id")
     return val
 
-def init_db():
-    """Ensures required tables and schema setup exist."""
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-
-        cursor.execute("""
+async def init_db():
+    """Ensures required tables and schema setup exist asynchronously."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS igdb_games (
                 id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -69,28 +66,27 @@ def init_db():
             );
         """)
 
-        # Migration Check: Ensure new columns exist in pre-existing tables
-        cursor.execute("PRAGMA table_info(igdb_games);")
-        columns = [column[1] for column in cursor.fetchall()]
-        if "category" not in columns:
-            cursor.execute("ALTER TABLE igdb_games ADD COLUMN category INTEGER DEFAULT 0;")
-        if "first_release_date" not in columns:
-            cursor.execute("ALTER TABLE igdb_games ADD COLUMN first_release_date INTEGER DEFAULT NULL;")
-        if "parent_game_id" not in columns:
-            cursor.execute("ALTER TABLE igdb_games ADD COLUMN parent_game_id INTEGER DEFAULT NULL;")
-        if "version_parent_id" not in columns:
-            cursor.execute("ALTER TABLE igdb_games ADD COLUMN version_parent_id INTEGER DEFAULT NULL;")
+        async with db.execute("PRAGMA table_info(igdb_games);") as cursor:
+            columns = [column[1] for column in await cursor.fetchall()]
 
-        # 1. Retain ONLY Main Games (0), Remakes/Remasters (8, 9, 10, 11)
-        cursor.execute("""
+        if "category" not in columns:
+            await db.execute("ALTER TABLE igdb_games ADD COLUMN category INTEGER DEFAULT 0;")
+        if "first_release_date" not in columns:
+            await db.execute("ALTER TABLE igdb_games ADD COLUMN first_release_date INTEGER DEFAULT NULL;")
+        if "parent_game_id" not in columns:
+            await db.execute("ALTER TABLE igdb_games ADD COLUMN parent_game_id INTEGER DEFAULT NULL;")
+        if "version_parent_id" not in columns:
+            await db.execute("ALTER TABLE igdb_games ADD COLUMN version_parent_id INTEGER DEFAULT NULL;")
+
+        # Purge non-main entries
+        await db.execute("""
                DELETE FROM igdb_games
                WHERE category NOT IN (0, 8, 9, 10, 11)
                OR version_parent_id IS NOT NULL
                OR parent_game_id IS NOT NULL;
         """)
 
-        # 2. Generic SQL Purge for miscategorized IGDB DLC/expansion titles
-        cursor.execute("""
+        await db.execute("""
             DELETE FROM igdb_games 
             WHERE name LIKE '%:% DLC%' 
                OR name LIKE '%-% DLC%'
@@ -102,25 +98,20 @@ def init_db():
                OR name LIKE '%:% Add-on%';
                """)
 
-        # Table 2: User Game Subscriptions
-        cursor.execute("""
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS subscriptions (
                 user_id INTEGER NOT NULL,
                 game_id INTEGER NOT NULL,
                 UNIQUE(user_id, game_id)
             );
         """)
-        conn.commit()
+        await db.commit()
     print("[DB Setup] Database schema initialized and cleaned.")
 
 # Custom Bot subclass to cleanly initialize tasks and command syncs
 class GameBot(commands.Bot):
     async def setup_hook(self):
-        # Start background tasks safely after the event loop is active
-        # 1. Guarantee DB schema exists BEFORE background tasks run
-        init_db()
-
-        # 2. Start background tasks safely after the event loop is active
+        await init_db()
         if not update_igdb_catalog.is_running():
             update_igdb_catalog.start()
 
@@ -131,10 +122,6 @@ class GameBot(commands.Bot):
 
 client = GameBot(command_prefix="!", intents=intents)
 tree = client.tree
-
-db = sqlite3.connect(DB_PATH)
-cursor = db.cursor()
-
 
 class HelpSelect(discord.ui.Select):
     def __init__(self):
@@ -213,7 +200,11 @@ async def update_igdb_catalog():
                         headers=headers,
                         data=body
                 ) as response:
-                    if response.status != 200:
+                    if response.status == 429:
+                        print("[IGDB Sync] Rate limited. Waiting 2 seconds...")
+                        await asyncio.sleep(2.0)
+                        continue
+                    elif response.status != 200:
                         err_text = await response.text()
                         print(f"[IGDB Sync] API Error {response.status}: {err_text}")
                         break
@@ -242,7 +233,7 @@ async def update_igdb_catalog():
                         filtered_games.append((g, p_game, v_parent))
 
                 if not filtered_games:
-                    await asyncio.sleep(0.25)
+                    await asyncio.sleep(0.3)
                     continue
 
                 records = []
@@ -275,7 +266,7 @@ async def update_igdb_catalog():
 
                 total_upserted += len(records)
                 print(f"[IGDB Sync] Batch synced: {len(records)} games | Current Max ID: {last_id}")
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(0.3)
 
         print(f"[IGDB Sync] Complete! Updated/Added {total_upserted} games.")
 
@@ -369,7 +360,8 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
 
 async def autocomplete_user_subscriptions(interaction: discord.Interaction, current: str):
     clean_current = current.strip().replace("’", "'").replace("‘", "'")
-    cursor.execute(
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
         """
         SELECT g.name
         FROM subscriptions s
@@ -379,8 +371,8 @@ async def autocomplete_user_subscriptions(interaction: discord.Interaction, curr
         LIMIT 25
         """,
         (interaction.user.id, f"%{clean_current}%")
-    )
-    rows = cursor.fetchall()
+        ) as cursor:
+            rows = await cursor.fetchall()
 
     if not rows:
         return [
@@ -449,7 +441,8 @@ async def fetch_and_cache_game_from_igdb(game_name: str, allow_dlc: bool = False
     vp = extract_id(selected.get("version_parent"))
     p_game = extract_id(selected.get("parent_game"))
 
-    cursor.execute(
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
         """
         INSERT OR IGNORE INTO igdb_games 
         (id, name, updated_at, first_release_date, category, parent_game_id, version_parent_id) 
@@ -457,7 +450,22 @@ async def fetch_and_cache_game_from_igdb(game_name: str, allow_dlc: bool = False
         """,
         (game_id, official_name, int(time.time()), first_release_date, category, p_game, vp)
     )
-    db.commit()
+        await db.commit()
+
+    return game_id, official_name
+
+async def resolve_to_base_game(game_id: int, official_name: str) -> tuple[int, str]:
+    """Recursively resolves special edition IDs to their true base game entry asynchronously."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT version_parent_id FROM igdb_games WHERE id = ?", (game_id,)) as cursor:
+            row = await cursor.fetchone()
+
+        if row and row[0]:
+            parent_id = row[0]
+            async with db.execute("SELECT id, name FROM igdb_games WHERE id = ?", (parent_id,)) as cursor:
+                parent_row = await cursor.fetchone()
+            if parent_row:
+                return await resolve_to_base_game(parent_row[0], parent_row[1])
 
     return game_id, official_name
 
@@ -476,9 +484,9 @@ class ConfirmDataDeletionView(discord.ui.View):
 
     @discord.ui.button(label="Confirm Deletion", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 1. Execute deletion query
-        cursor.execute("DELETE FROM subscriptions WHERE user_id = ?", (interaction.user.id,))
-        db.commit()
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM subscriptions WHERE user_id = ?", (interaction.user.id,))
+            await db.commit()
 
         # 2. Disable buttons and inform the user
         for child in self.children:
@@ -499,34 +507,19 @@ class ConfirmDataDeletionView(discord.ui.View):
             view=self
         )
 
-def resolve_to_base_game(game_id: int, official_name: str) -> tuple[int, str]:
-    """Recursively resolves special edition IDs to their true base game entry."""
-    cursor.execute("SELECT version_parent_id FROM igdb_games WHERE id = ?", (game_id,))
-    row = cursor.fetchone()
-
-    if row and row[0]:
-        parent_id = row[0]
-        cursor.execute("SELECT id, name FROM igdb_games WHERE id = ?", (parent_id,))
-        parent_row = cursor.fetchone()
-        if parent_row:
-            # Re-resolve in case the parent itself points higher
-            return resolve_to_base_game(parent_row[0], parent_row[1])
-
-    return game_id, official_name
-
 @tree.command(name="subscribe", description="Subscribe to a game")
 @app_commands.autocomplete(game=autocomplete_games)
 async def subscribe(interaction: discord.Interaction, game: str):
+    await interaction.response.defer(ephemeral=True)
     clean_game = game.strip().replace("’", "'").replace("‘", "'")
-    cursor.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,))
-    row = cursor.fetchone()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,)) as cursor:
+            row = await cursor.fetchone()
 
     if row:
         raw_id, raw_name = row[0], row[1]
     else:
-        # Defer response slightly in case the live API network request takes a moment
-        await interaction.response.defer(ephemeral=True)
-
         user_searching_dlc = any(char in clean_game for char in [":", "-", "–", "—"])
         result = await fetch_and_cache_game_from_igdb(clean_game, allow_dlc=user_searching_dlc)
         if not result:
@@ -538,34 +531,26 @@ async def subscribe(interaction: discord.Interaction, game: str):
 
         raw_id, raw_name = result
 
-    # Resolve special editions to base game
-    game_id, official_name = resolve_to_base_game(raw_id, raw_name)
+    game_id, official_name = await resolve_to_base_game(raw_id, raw_name)
 
-    cursor.execute(
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
         "SELECT 1 FROM subscriptions WHERE user_id = ? AND game_id = ?",
         (interaction.user.id, game_id)
-    )
-    if cursor.fetchone():
-        msg = f"You are already subscribed to **{official_name}**!"
-        if interaction.response.is_done():
-            await interaction.followup.send(msg, ephemeral=True)
-        else:
-            await interaction.response.send_message(msg, ephemeral=True)
+        ) as cursor:
+            already_subbed = await cursor.fetchone()
+
+        if already_subbed:
+            await interaction.followup.send(f"You are already subscribed to **{official_name}**!", ephemeral=True)
         return
 
-    # 4. Insert new subscription
-    cursor.execute(
+        await db.execute(
         "INSERT INTO subscriptions (user_id, game_id) VALUES (?, ?)",
         (interaction.user.id, game_id)
     )
-    db.commit()
+        await db.commit()
 
-    msg = f"You subscribed to **{official_name}**!"
-    if interaction.response.is_done():
-        await interaction.followup.send(msg, ephemeral=True)
-    else:
-        await interaction.response.send_message(msg, ephemeral=True)
-
+    await interaction.followup.send(f"You subscribed to **{official_name}**!", ephemeral=True)
 
 @tree.command(name="unsubscribe", description="Unsubscribe from a game")
 @app_commands.autocomplete(game=autocomplete_user_subscriptions)
@@ -579,21 +564,21 @@ async def unsubscribe(interaction: discord.Interaction, game: str):
         return
 
     clean_game = game.strip().replace("’", "'").replace("‘", "'")
-    cursor.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,))
-    row = cursor.fetchone()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,)) as cursor:
+            row = await cursor.fetchone()
 
     if not row:
         await interaction.response.send_message("Game not found.", ephemeral=True)
         return
 
-    game_id, official_name = resolve_to_base_game(row[0], row[1])
+        game_id, official_name = await resolve_to_base_game(row[0], row[1])
 
-    # Directly delete the subscription
-    cursor.execute(
+        await db.execute(
         "DELETE FROM subscriptions WHERE user_id = ? AND game_id = ?",
         (interaction.user.id, game_id)
     )
-    db.commit()
+        await db.commit()
 
     await interaction.response.send_message(f"You unsubscribed from **{official_name}**", ephemeral=True)
 
@@ -602,17 +587,18 @@ async def unsubscribe(interaction: discord.Interaction, game: str):
 @app_commands.autocomplete(game=autocomplete_games)
 async def pinggame(interaction: discord.Interaction, game: str):
     clean_game = game.strip().replace("’", "'").replace("‘", "'")
-    cursor.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,))
-    row = cursor.fetchone()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,)) as cursor:
+            row = await cursor.fetchone()
 
     if not row:
         await interaction.response.send_message("Game not found.")
         return
 
-    game_id, official_name = resolve_to_base_game(row[0], row[1])
+        game_id, official_name = await resolve_to_base_game(row[0], row[1])
 
-    cursor.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,))
-    users = cursor.fetchall()
+        async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
+            users = await cursor.fetchall()
 
     if not users:
         await interaction.response.send_message(f"No subscribers for **{official_name}**.")
@@ -625,7 +611,8 @@ async def pinggame(interaction: discord.Interaction, game: str):
 async def usersubscriptions(interaction: discord.Interaction, user: discord.User = None, public: bool = False):
     target_user = user or interaction.user
 
-    cursor.execute(
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
         """
         SELECT g.name
         FROM subscriptions s
@@ -634,8 +621,8 @@ async def usersubscriptions(interaction: discord.Interaction, user: discord.User
         ORDER BY g.name ASC
         """,
         (target_user.id,)
-    )
-    rows = cursor.fetchall()
+        ) as cursor:
+            rows = await cursor.fetchall()
 
     if target_user.id == interaction.user.id:
         header = "Your subscribed games"
@@ -665,17 +652,18 @@ async def showsubscribers(interaction: discord.Interaction, game: str, public: b
         return
 
     clean_game = game.strip().replace("’", "'").replace("‘", "'")
-    cursor.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,))
-    row = cursor.fetchone()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,)) as cursor:
+            row = await cursor.fetchone()
 
     if not row:
         await interaction.response.send_message("Game not found.", ephemeral=True)
         return
 
-    game_id, official_name = resolve_to_base_game(row[0], row[1])
+        game_id, official_name = await resolve_to_base_game(row[0], row[1])
 
-    cursor.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,))
-    users = cursor.fetchall()
+        async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
+            users = await cursor.fetchall()
 
     if not users:
         await interaction.response.send_message(f"No subscribers for **{official_name}**.", ephemeral=not public)
