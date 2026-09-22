@@ -189,8 +189,8 @@ async def update_igdb_catalog():
             while True:
                 # Filter BOTH parent_game AND version_parent directly in the API query
                 body = (
-                    f"fields id, name, updated_at, first_release_date, category, version_parent, parent_game; "
-                    f"where id > {last_id} & version_parent = null & parent_game = null; "
+                    f"fields id, name, updated_at, first_release_date, category, version_parent, parent_game, game_modes; "
+                    f"where id > {last_id} & version_parent = null & parent_game = null & game_modes = (2, 3, 4, 5); "
                     f"sort id asc; "
                     f"limit {limit};"
                 )
@@ -286,7 +286,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
 
     choices = []
 
-    # IF USER TYPED A DELIMITER: Query IGDB live with a strict 1.5-second timeout
+    # 1. DELIMITER SEARCH: Query IGDB live if user explicitly types DLC delimiters/keywords
     if user_explicitly_searching_dlc and len(base_search_term) > 2:
         client_id = os.getenv("TWITCH_CLIENT_ID")
         access_token = os.getenv("TWITCH_ACCESS_TOKEN")
@@ -308,11 +308,10 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                                 g_name = item.get("name", "")
                                 choices.append(app_commands.Choice(name=g_name[:100], value=g_name[:100]))
             except Exception:
-                # If IGDB times out or fails, gracefully fall back to local database search below
                 pass
 
-    # STANDARD LOCAL DATABASE SEARCH
-    if not choices:
+    # 2. LOCAL MULTIPLAYER DATABASE SEARCH
+    if not user_explicitly_searching_dlc:
         async with aiosqlite.connect(DB_PATH) as db_async:
             if not clean_current:
                 async with db_async.execute(
@@ -355,7 +354,42 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
 
             choices.append(app_commands.Choice(name=display_name[:100], value=name[:100]))
 
-    # Deduplicate and sort choices
+    # 3. LIVE IGDB FALLBACK & SUPPLEMENT: Run if search has 3+ chars and fewer than 25 local results
+    if len(choices) < 25 and clean_current and len(clean_current) >= 3 and not user_explicitly_searching_dlc:
+        client_id = os.getenv("TWITCH_CLIENT_ID")
+        access_token = os.getenv("TWITCH_ACCESS_TOKEN")
+
+        if client_id and access_token:
+            headers = {
+                "Client-ID": client_id,
+                "Authorization": f"Bearer {access_token}"
+            }
+            # Query main games (category = 0, 8, 9, 10, 11) and filter out parents
+            body = (
+                f'fields name, category, version_parent, parent_game; '
+                f'search "{clean_current}"; '
+                f'where version_parent = null & parent_game = null; '
+                f'limit 25;'
+            )
+
+            try:
+                timeout = aiohttp.ClientTimeout(total=1.5)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
+                        if resp.status == 200:
+                            igdb_results = await resp.json()
+                            for item in igdb_results:
+                                g_name = item.get("name", "")
+
+                                # Skip generic DLC patterns unless user explicitly searched for DLCs
+                                if GENERIC_DLC_PATTERN.search(g_name):
+                                    continue
+
+                                choices.append(app_commands.Choice(name=g_name[:100], value=g_name[:100]))
+            except Exception:
+                pass
+
+    # Deduplicate while preserving unique display choices
     unique_choices = {choice.name: choice for choice in choices}.values()
     sorted_choices = sorted(list(unique_choices), key=lambda choice: choice.name.lower())
     return sorted_choices[:25]
@@ -572,18 +606,22 @@ async def subscribe(interaction: discord.Interaction, game: str):
     await interaction.response.defer(ephemeral=True)
     clean_game = game.strip().replace("’", "'").replace("‘", "'")
 
+    raw_id = None
+    raw_name = None
+
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,)) as cursor:
             row = await cursor.fetchone()
-
     if row:
         raw_id, raw_name = row[0], row[1]
-    else:
+
+    # If game wasn't found in local multiplayer cache, fetch and store it from IGDB live
+    if not raw_id:
         user_searching_dlc = any(char in clean_game for char in [":", "-", "–", "—"])
         result = await fetch_and_cache_game_from_igdb(clean_game, allow_dlc=user_searching_dlc)
         if not result:
             await interaction.followup.send(
-                f"Could not find **{game}** in local cache or on IGDB.",
+                f"Could not find **{clean_game}** in local cache or on IGDB.",
                 ephemeral=True
             )
             return
