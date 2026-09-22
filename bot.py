@@ -40,8 +40,9 @@ GENERIC_DLC_PATTERN = re.compile(
 )
 
 def normalize_game_name(name: str) -> str:
-    """Strips edition suffixes and trailing punctuation from search terms."""
-    clean_name = EDITION_PATTERN.sub('', name)
+    """Strips edition suffixes, standardizes mobile quotes, and removes trailing punctuation."""
+    clean_name = name.replace("’", "'").replace("‘", "'")
+    clean_name = EDITION_PATTERN.sub('', clean_name)
     clean_name = re.sub(r'[\:\-\–\—\s]+$', '', clean_name)
     return clean_name.strip()
 
@@ -291,64 +292,83 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
     user_explicitly_searching_dlc = any(char in clean_current for char in [":", "-", "–", "—"]) or \
                                     any(k in clean_current.lower() for k in ["dlc", "expansion", "pack"])
 
-    async with aiosqlite.connect(DB_PATH) as db_async:
-        if not clean_current:
-            async with db_async.execute(
-                    """
-                    SELECT name, first_release_date, COUNT(*) OVER (PARTITION BY name) as name_count
-                    FROM igdb_games
-                    GROUP BY name
-                    ORDER BY first_release_date DESC, name ASC
-                    LIMIT 25
-                    """
-            ) as async_cursor:
-                rows = await async_cursor.fetchall()
-        else:
-            # 1. Exact match tiering guarantees base titles aren't squeezed out
-            # 2. Starts-with match comes next
-            # 3. Contains match comes last
-            async with db_async.execute(
-                    """
-                    SELECT name, first_release_date, COUNT(*) OVER (PARTITION BY name) as name_count
-                    FROM igdb_games
-                    WHERE name LIKE ?
-                    GROUP BY name
-                    ORDER BY
-                        CASE
-                            WHEN LOWER(name) = LOWER(?) THEN 1
-                            WHEN name LIKE ? THEN 2
-                            ELSE 3
-                            END,
-                        LENGTH(name) ASC,
-                        first_release_date ASC
-                    LIMIT 25
-                    """,
-                    (f"%{clean_current}%", clean_current, f"{clean_current}%")
-            ) as async_cursor:
-                rows = await async_cursor.fetchall()
+    # Extract base search query before delimiter (e.g., "Abiotic Factor: " -> "Abiotic Factor")
+    base_search_term = re.split(r'[\:\-\–\—]', clean_current)[0].strip()
 
     choices = []
-    for name, release_date, name_count in rows:
-        # Append release year if multiple entries share the exact title
-        if name_count > 1 and release_date:
-            year = time.strftime("%Y", time.gmtime(release_date))
-            display_name = f"{name} ({year})"
-        else:
-            display_name = name
 
-        choices.append(
-            app_commands.Choice(
-                name=display_name[:100],
-                value=name[:100]
-            )
-        )
+    # IF USER TYPED A DELIMITER: Bypasses strict database filtering and fetches live from IGDB directly
+    if user_explicitly_searching_dlc and len(base_search_term) > 2:
+        client_id = os.getenv("TWITCH_CLIENT_ID")
+        access_token = os.getenv("TWITCH_ACCESS_TOKEN")
 
-    # Sort retrieved items alphabetically (A-Z)
-    choices.sort(key=lambda choice: choice.name.lower())
+        if client_id and access_token:
+            headers = {
+                "Client-ID": client_id,
+                "Authorization": f"Bearer {access_token}"
+            }
+            # Search IGDB directly using the typed prefix
+            body = f'fields name; search "{clean_current}"; limit 25;'
 
-    return choices
+            async with aiohttp.ClientSession() as session:
+                async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
+                    if resp.status == 200:
+                        igdb_results = await resp.json()
+                        for item in igdb_results:
+                            g_name = item.get("name", "")
+                            choices.append(app_commands.Choice(name=g_name[:100], value=g_name[:100]))
+
+    # STANDARD LOCAL DATABASE SEARCH (Runs when no delimiter is used, or if IGDB API request fails)
+    if not choices:
+        async with aiosqlite.connect(DB_PATH) as db_async:
+            if not clean_current:
+                async with db_async.execute(
+                        """
+                        SELECT name, first_release_date, COUNT(*) OVER (PARTITION BY name) as name_count
+                        FROM igdb_games
+                        GROUP BY name
+                        ORDER BY first_release_date DESC, name ASC
+                        LIMIT 25
+                        """
+                ) as async_cursor:
+                    rows = await async_cursor.fetchall()
+            else:
+                async with db_async.execute(
+                        """
+                        SELECT name, first_release_date, COUNT(*) OVER (PARTITION BY name) as name_count
+                        FROM igdb_games
+                        WHERE name LIKE ?
+                        GROUP BY name
+                        ORDER BY
+                            CASE
+                                WHEN LOWER(name) = LOWER(?) THEN 1
+                                WHEN name LIKE ? THEN 2
+                                ELSE 3
+                                END,
+                            LENGTH(name) ASC,
+                            first_release_date ASC
+                        LIMIT 25
+                        """,
+                        (f"%{clean_current}%", clean_current, f"{clean_current}%")
+                ) as async_cursor:
+                    rows = await async_cursor.fetchall()
+
+        for name, release_date, name_count in rows:
+            if name_count > 1 and release_date:
+                year = time.strftime("%Y", time.gmtime(release_date))
+                display_name = f"{name} ({year})"
+            else:
+                display_name = name
+
+            choices.append(app_commands.Choice(name=display_name[:100], value=name[:100]))
+
+    # Deduplicate and sort choices alphabetically
+    unique_choices = {choice.name: choice for choice in choices}.values()
+    sorted_choices = sorted(list(unique_choices), key=lambda choice: choice.name.lower())
+    return sorted_choices[:25]
 
 async def autocomplete_user_subscriptions(interaction: discord.Interaction, current: str):
+    clean_current = current.strip().replace("’", "'").replace("‘", "'")
     cursor.execute(
         """
         SELECT g.name
@@ -358,7 +378,7 @@ async def autocomplete_user_subscriptions(interaction: discord.Interaction, curr
         ORDER BY g.name ASC
         LIMIT 25
         """,
-        (interaction.user.id, f"%{current}%")
+        (interaction.user.id, f"%{clean_current}%")
     )
     rows = cursor.fetchall()
 
@@ -379,7 +399,7 @@ async def autocomplete_user_subscriptions(interaction: discord.Interaction, curr
     ]
 
 
-async def fetch_and_cache_game_from_igdb(game_name: str) -> tuple[int, str] | None:
+async def fetch_and_cache_game_from_igdb(game_name: str, allow_dlc: bool = False) -> tuple[int, str] | None:
     client_id = os.getenv("TWITCH_CLIENT_ID")
     access_token = os.getenv("TWITCH_ACCESS_TOKEN")
 
@@ -393,7 +413,7 @@ async def fetch_and_cache_game_from_igdb(game_name: str) -> tuple[int, str] | No
 
     # 1. Apply keyword normalization to the search phrase
     clean_search = normalize_game_name(game_name)
-    body = f'fields id, name, category, first_release_date, version_parent, parent_game; search "{clean_search}"; limit 5;'
+    body = f'fields id, name, category, first_release_date, version_parent, parent_game; search "{clean_search}"; limit 10;'
 
     async with aiohttp.ClientSession() as session:
         async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
@@ -411,7 +431,11 @@ async def fetch_and_cache_game_from_igdb(game_name: str) -> tuple[int, str] | No
         v_parent = extract_id(item.get("version_parent"))
         g_name = item.get("name", "")
 
-        if p_game is None and v_parent is None and not GENERIC_DLC_PATTERN.search(g_name):
+        # Ignore DLC items unless explicitly permitted by search
+        if not allow_dlc and GENERIC_DLC_PATTERN.search(g_name):
+            continue
+
+        if p_game is None and v_parent is None:
             selected = item
             break
 
@@ -493,7 +517,8 @@ def resolve_to_base_game(game_id: int, official_name: str) -> tuple[int, str]:
 @tree.command(name="subscribe", description="Subscribe to a game")
 @app_commands.autocomplete(game=autocomplete_games)
 async def subscribe(interaction: discord.Interaction, game: str):
-    cursor.execute("SELECT id, name FROM igdb_games WHERE name = ?", (game,))
+    clean_game = game.strip().replace("’", "'").replace("‘", "'")
+    cursor.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,))
     row = cursor.fetchone()
 
     if row:
@@ -502,8 +527,8 @@ async def subscribe(interaction: discord.Interaction, game: str):
         # Defer response slightly in case the live API network request takes a moment
         await interaction.response.defer(ephemeral=True)
 
-        # 2. Live IGDB Fallback: Fetch missing game on the fly
-        result = await fetch_and_cache_game_from_igdb(game)
+        user_searching_dlc = any(char in clean_game for char in [":", "-", "–", "—"])
+        result = await fetch_and_cache_game_from_igdb(clean_game, allow_dlc=user_searching_dlc)
         if not result:
             await interaction.followup.send(
                 f"Could not find **{game}** in local cache or on IGDB.",
@@ -553,7 +578,8 @@ async def unsubscribe(interaction: discord.Interaction, game: str):
         )
         return
 
-    cursor.execute("SELECT id, name FROM igdb_games WHERE name = ?", (game,))
+    clean_game = game.strip().replace("’", "'").replace("‘", "'")
+    cursor.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,))
     row = cursor.fetchone()
 
     if not row:
@@ -575,7 +601,8 @@ async def unsubscribe(interaction: discord.Interaction, game: str):
 @app_commands.checks.cooldown(1, 30.0)
 @app_commands.autocomplete(game=autocomplete_games)
 async def pinggame(interaction: discord.Interaction, game: str):
-    cursor.execute("SELECT id, name FROM igdb_games WHERE name = ?", (game,))
+    clean_game = game.strip().replace("’", "'").replace("‘", "'")
+    cursor.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,))
     row = cursor.fetchone()
 
     if not row:
@@ -637,7 +664,8 @@ async def showsubscribers(interaction: discord.Interaction, game: str, public: b
         await interaction.response.send_message("This command can only be used inside a server.", ephemeral=True)
         return
 
-    cursor.execute("SELECT id, name FROM igdb_games WHERE name = ?", (game,))
+    clean_game = game.strip().replace("’", "'").replace("‘", "'")
+    cursor.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,))
     row = cursor.fetchone()
 
     if not row:
