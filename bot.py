@@ -284,7 +284,12 @@ async def before_catalog_update():
     await client.wait_until_ready()
 
 async def autocomplete_games(interaction: discord.Interaction, current: str):
-    clean_current = current.strip()
+    # Fix mobile smart quotes
+    clean_current = current.strip().replace("’", "'").replace("‘", "'")
+
+    # Detect if user specifically typed a subtitle delimiter or keyword
+    user_explicitly_searching_dlc = any(char in clean_current for char in [":", "-", "–", "—"]) or \
+                                    any(k in clean_current.lower() for k in ["dlc", "expansion", "pack"])
 
     async with aiosqlite.connect(DB_PATH) as db_async:
         if not clean_current:
