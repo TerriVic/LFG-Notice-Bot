@@ -38,6 +38,9 @@ GENERIC_DLC_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# Cache for command IDs used by clickable help mentions
+COMMAND_IDS = {}
+
 def normalize_game_name(name: str) -> str:
     """Strips edition suffixes, standardizes mobile quotes, and removes trailing punctuation."""
     clean_name = name.replace("’", "'").replace("‘", "'")
@@ -122,43 +125,6 @@ class GameBot(commands.Bot):
 
 client = GameBot(command_prefix="!", intents=intents)
 tree = client.tree
-
-class HelpSelect(discord.ui.Select):
-    def __init__(self):
-        options = [
-            discord.SelectOption(label="Subscriptions", description="Subscribe, unsubscribe, and view games", emoji="🎮"),
-            discord.SelectOption(label="Pings & LFG", description="Find players and notify subscribers", emoji="🔔"),
-            discord.SelectOption(label="Privacy & Data", description="Manage your stored user data", emoji="🔒"),
-        ]
-        super().__init__(placeholder="Choose a command category...", options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        if self.values[0] == "Subscriptions":
-            embed = discord.Embed(title="🎮 Subscription Commands", color=discord.Color.blue())
-            embed.add_field(name="/subscribe <game>", value="Subscribe to pings for a specific game.", inline=False)
-            embed.add_field(name="/unsubscribe <game>", value="Remove your subscription to a game.", inline=False)
-            embed.add_field(name="/usersubscriptions", value="View your active game subscriptions.", inline=False)
-
-        elif self.values[0] == "Pings & LFG":
-            embed = discord.Embed(title="🔔 Ping & LFG Commands", color=discord.Color.green())
-            embed.add_field(name="/pinggame <game>", value="Ping everyone subscribed to a game.", inline=False)
-            embed.add_field(name="/showsubscribers <game>", value="See who is subscribed without pinging.", inline=False)
-
-        elif self.values[0] == "Privacy & Data":
-            embed = discord.Embed(title="🔒 Privacy & Data Commands", color=discord.Color.red())
-            embed.add_field(
-                name="/delete_my_data",
-                value="Permanently delete all your subscriptions and user data from the bot's database.",
-                inline=False
-            )
-
-        await interaction.response.edit_message(embed=embed)
-
-
-class HelpView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=60)
-        self.add_item(HelpSelect())
 
 @tasks.loop(hours=168)
 async def update_igdb_catalog():
@@ -680,10 +646,10 @@ async def unsubscribe(interaction: discord.Interaction, game: str):
 
     await interaction.response.send_message(f"You unsubscribed from **{official_name}**", ephemeral=True)
 
-@tree.command(name="pinggame", description="Ping all users subscribed to a game")
+@tree.command(name="ping_game", description="Ping all users subscribed to a game")
 @app_commands.checks.cooldown(1, 30.0)
 @app_commands.autocomplete(game=autocomplete_games)
-async def pinggame(interaction: discord.Interaction, game: str):
+async def ping_game(interaction: discord.Interaction, game: str):
     clean_game = game.strip().replace("’", "'").replace("‘", "'")
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,)) as cursor:
@@ -705,8 +671,8 @@ async def pinggame(interaction: discord.Interaction, game: str):
     mentions = " ".join(f"<@{u[0]}>" for u in users)
     await interaction.response.send_message(f"Players interested in **{official_name}**: {mentions}")
 
-@tree.command(name="usersubscriptions", description="View subscriptions for yourself (default) or another user.")
-async def usersubscriptions(interaction: discord.Interaction, user: discord.User = None, public: bool = False):
+@tree.command(name="user_subscriptions", description="View subscriptions for yourself (default) or another user.")
+async def user_subscriptions(interaction: discord.Interaction, user: discord.User = None, public: bool = False):
     target_user = user or interaction.user
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -740,11 +706,9 @@ async def usersubscriptions(interaction: discord.Interaction, user: discord.User
         ephemeral=not public
     )
 
-
-@tree.command(name="showsubscribers", description="View all users in this server subscribed to a game without pinging them")
+@tree.command(name="show_subscribers", description="View all users in this server subscribed to a game without pinging them")
 @app_commands.autocomplete(game=autocomplete_games)
-async def showsubscribers(interaction: discord.Interaction, game: str, public: bool = False):
-    # Ensure this command is run inside a server
+async def show_subscribers(interaction: discord.Interaction, game: str, public: bool = False):
     if not interaction.guild:
         await interaction.response.send_message("This command can only be used inside a server.", ephemeral=True)
         return
@@ -802,19 +766,53 @@ async def delete_my_data(interaction: discord.Interaction):
     )
 
 
-@tree.command(name="help", description="Learn how to use the LFG Notice Bot")
+@tree.command(name="help", description="Show information about available bot commands")
 async def help_command(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="LFG Notice Bot Help",
-        description="Select a category below to view detailed command guides.",
-        color=discord.Color.blurple()
-    )
-    await interaction.response.send_message(embed=embed, view=HelpView(), ephemeral=True)
+    # Lookup helper: returns </name:id> if found, or standard `/name` backticks as fallback
+    def fmt(name: str) -> str:
+        cid = COMMAND_IDS.get(name)
+        return f"</{name}:{cid}>" if cid else f"`/{name}`"
 
+    embed = discord.Embed(
+        title="Bot Command Guide",
+        description="Here is everything you can do with the bot:",
+        color=discord.Color.blue()
+    )
+
+    embed.add_field(
+        name="Managing Subscriptions",
+        value=(
+            f"• {fmt('subscribe')} `<game>` — Subscribe to a game's LFG notifications.\n"
+            f"• {fmt('unsubscribe')} `<game>` — Unsubscribe from one of your active subscriptions.\n"
+            f"• {fmt('user_subscriptions')} `[user] [public]` — View active game subscriptions."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="Server Activity & Social",
+        value=(
+            f"• {fmt('ping_game')} `<game>` — Ping everyone in the server subscribed to a game.\n"
+            f"• {fmt('top_games')} `[limit] [public]` — View popular server games.\n"
+            f"• {fmt('show_subscribers')} `<game> [public]` — List all members subscribed to a game."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="Data & Privacy",
+        value=(
+            f"• {fmt('delete_my_data')} — Permanently wipe your account and subscriptions."
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text="Looking for a missing game or DLC? Type its full name in /subscribe!")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    # Unwrap original command errors if wrapped
     if isinstance(error, app_commands.CommandOnCooldown):
         seconds = round(error.retry_after)
         msg = f"⏳ Easy there! You can ping a game again in **{seconds} seconds**."
@@ -827,9 +825,18 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 
 @client.event
+@client.event
 async def on_ready():
     print(f"Logged in as {client.user}")
 
+    # Populate command IDs for clickable help mentions
+    try:
+        fetched_cmds = await client.tree.fetch_commands()
+        global COMMAND_IDS
+        COMMAND_IDS = {cmd.name: cmd.id for cmd in fetched_cmds}
+        print(f"[Help] Cached {len(COMMAND_IDS)} command IDs for help menu.")
+    except Exception as e:
+        print(f"[Help] Failed to fetch command IDs on startup: {e}")
 
 client.run(TOKEN)
 
