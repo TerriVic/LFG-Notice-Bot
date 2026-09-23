@@ -248,6 +248,7 @@ async def update_igdb_catalog():
 
         limit = 500
         total_upserted = 0
+        page_count = 0
 
         async with aiohttp.ClientSession() as session:
             while True:
@@ -279,6 +280,7 @@ async def update_igdb_catalog():
                     break
 
                 last_id = games[-1]["id"]
+                page_count += 1
 
                 # Allow Main Game (0), Remaster/Remake (8, 9, 10, 11)
                 valid_categories = {0, 8, 9, 10, 11}
@@ -325,17 +327,22 @@ async def update_igdb_catalog():
                                                   category = excluded.category,
                                                   parent_game_id = excluded.parent_game_id,
                                                   version_parent_id = excluded.version_parent_id,
-                        is_multiplayer = excluded.is_multiplayer,
-                        total_rating_count = excluded.total_rating_count
+                                                  is_multiplayer = excluded.is_multiplayer,
+                                                  total_rating_count = excluded.total_rating_count
                     """,
                     records
                 )
                 await db_async.commit()
 
                 total_upserted += len(records)
+
+                # Periodic progress logging (every 5 batches / 2,500 evaluated items)
+                if page_count % 5 == 0:
+                    print(f"[IGDB Sync] Batch {page_count}: Upserted {len(records)} games (Total added/updated: {total_upserted}). Last ID: {last_id}")
+
                 await asyncio.sleep(0.3)
 
-        print(f"[IGDB Sync] Finished catalog sync. Added/Updated {total_upserted} games.")
+        print(f"[IGDB Sync] Finished catalog sync. Added/Updated {total_upserted} games across {page_count} batches.")
 
 @update_igdb_catalog.before_loop
 async def before_catalog_update():
