@@ -65,15 +65,16 @@ async def init_db():
                                                                    category INTEGER DEFAULT 0,
                                                                    parent_game_id INTEGER DEFAULT NULL,
                                                                    version_parent_id INTEGER DEFAULT NULL,
-                is_multiplayer INTEGER DEFAULT 0,
-                total_rating_count INTEGER DEFAULT 0
+                                                                   is_multiplayer INTEGER DEFAULT 0,
+                                                                   total_rating_count INTEGER DEFAULT 0
                          );
                          """)
 
-        # Migration: Dynamically add missing columns if using a legacy DB file
+        # Dynamic Migration: Fetch existing column names
         async with db.execute("PRAGMA table_info(igdb_games);") as cursor:
             columns = [column[1] for column in await cursor.fetchall()]
 
+        # Ensure all modern columns exist on legacy databases
         if "first_release_date" not in columns:
             await db.execute("ALTER TABLE igdb_games ADD COLUMN first_release_date INTEGER DEFAULT NULL;")
         if "is_multiplayer" not in columns:
@@ -87,17 +88,15 @@ async def init_db():
         if "total_rating_count" not in columns:
             await db.execute("ALTER TABLE igdb_games ADD COLUMN total_rating_count INTEGER DEFAULT 0;")
 
-        # Create index to drastically speed up autocomplete LIKE queries
         await db.execute("CREATE INDEX IF NOT EXISTS idx_igdb_multiplayer_name ON igdb_games(is_multiplayer, name);")
 
-        # Create subscriptions table if missing
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS subscriptions (
-                user_id INTEGER NOT NULL,
-                game_id INTEGER NOT NULL,
-                PRIMARY KEY (user_id, game_id)
-            );
-        """)
+                         CREATE TABLE IF NOT EXISTS subscriptions (
+                                                                      user_id INTEGER NOT NULL,
+                                                                      game_id INTEGER NOT NULL,
+                                                                      PRIMARY KEY (user_id, game_id)
+                         );
+                         """)
 
         await db.commit()
     print("[DB Setup] Schema checked and migrated safely.")
@@ -569,7 +568,7 @@ async def fetch_and_cache_game_from_igdb(game_name: str, allow_dlc: bool = False
 
     is_mp = 1 if raw_mode_ids.intersection({2, 3, 4, 5, 6}) else 0
 
-    # Save to SQLite with the is_multiplayer status set
+    # Save to SQLite with total_rating_count passed properly in the tuple
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
@@ -583,8 +582,8 @@ async def fetch_and_cache_game_from_igdb(game_name: str, allow_dlc: bool = False
                                           category = excluded.category,
                                           parent_game_id = excluded.parent_game_id,
                                           version_parent_id = excluded.version_parent_id,
-                is_multiplayer = excluded.is_multiplayer,
-                total_rating_count = excluded.total_rating_count
+                                          is_multiplayer = excluded.is_multiplayer,
+                                          total_rating_count = excluded.total_rating_count
             """,
             (game_id, official_name, int(time.time()), first_release_date, category, p_game, vp, is_mp, rating_count)
         )
