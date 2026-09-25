@@ -362,14 +362,11 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                                   AND (parent_game_id IS NULL OR parent_game_id = 0)
                                   AND (version_parent_id IS NULL OR version_parent_id = 0)
                                 ORDER BY total_rating_count DESC, id ASC
-                                LIMIT 25 \
+                                LIMIT 25
                                 """
                 async with db.execute(query_default) as cursor:
                     rows = await cursor.fetchall()
                     return [app_commands.Choice(name=r[0][:100], value=r[0][:100]) for r in rows if not GENERIC_DLC_PATTERN.search(r[0])]
-
-        user_explicitly_searching_dlc = any(char in clean_current for char in [":", "-", "–", "—"]) or \
-                                        any(k in clean_current.lower() for k in ["dlc", "expansion", "pack", "add-on"])
 
         choice_candidates = []
         seen_names = set()
@@ -400,7 +397,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
             ratio = difflib.SequenceMatcher(None, q_low, t_low).ratio()
             return (3, ratio)
 
-        # 2. LOCAL MULTIPLAYER SEARCH (Tier 1)
+        # 2. LOCAL SEARCH
         async with aiosqlite.connect(DB_PATH) as db:
             query_t1 = """
                        SELECT name, is_multiplayer, total_rating_count FROM igdb_games
@@ -409,32 +406,30 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                          AND (version_parent_id IS NULL OR version_parent_id = 0)
                          AND (name LIKE ? OR name LIKE ?)
                        ORDER BY is_multiplayer DESC, total_rating_count DESC
-                       LIMIT 25 \
+                       LIMIT 25
                        """
             params_t1 = (f"{clean_current}%", f"%{clean_current}%")
 
             async with db.execute(query_t1, params_t1) as cursor:
                 rows_t1 = await cursor.fetchall()
                 for name, is_mp, rating_cnt in rows_t1:
-                    if not user_explicitly_searching_dlc and any(c in name for c in [":", "-", "–", "—"]):
-                        continue
                     if not GENERIC_DLC_PATTERN.search(name) and name.lower() not in seen_names:
                         match_tier, similarity = compute_match_score(name, clean_current)
                         mp_prio = 0 if is_mp == 1 else 1
                         choice_candidates.append((match_tier, mp_prio, -similarity, -(rating_cnt or 0), name))
                         seen_names.add(name.lower())
 
-        # 3. LIVE IGDB SEARCH (Tier 2 - Fetches single-player / uncached games)
+# 3. LIVE IGDB SEARCH
         if len(clean_current) >= 3:
             client_id = os.getenv("TWITCH_CLIENT_ID")
             access_token = os.getenv("TWITCH_ACCESS_TOKEN")
 
             if client_id and access_token:
                 headers = {"Client-ID": client_id, "Authorization": f"Bearer {access_token}"}
-                body = f'fields name, total_rating_count, game_modes; search "{clean_current}"; where version_parent = null & parent_game = null; limit 15;'
+                body = f'fields name, total_rating_count, game_modes; search "{clean_current}"; limit 15;'
 
                 try:
-                    timeout = aiohttp.ClientTimeout(total=0.8)
+                    timeout = aiohttp.ClientTimeout(total=2.0)
                     async with aiohttp.ClientSession(timeout=timeout) as session:
                         async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
                             if resp.status == 200:
@@ -454,8 +449,6 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                                     is_mp = 1 if raw_mode_ids.intersection({2, 3, 4, 5, 6}) else 0
 
                                     if g_name.lower() in seen_names:
-                                        continue
-                                    if not user_explicitly_searching_dlc and any(c in g_name for c in [":", "-", "–", "—"]):
                                         continue
                                     if not GENERIC_DLC_PATTERN.search(g_name):
                                         match_tier, similarity = compute_match_score(g_name, clean_current)
