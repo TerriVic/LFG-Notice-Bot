@@ -818,33 +818,52 @@ async def show_subscribers(interaction: discord.Interaction, game: str, public: 
         await interaction.response.send_message("This command can only be used inside a server.", ephemeral=True)
         return
 
+    await interaction.response.defer(ephemeral=not public)
     clean_game = game.strip().replace("’", "'").replace("‘", "'")
+
+    raw_id = None
+    raw_name = None
+
+    # Keep database operations cleanly scoped or re-opened
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,)) as cursor:
             row = await cursor.fetchone()
 
-    if not row:
-        await interaction.response.send_message("Game not found.", ephemeral=True)
-        return
+    if row:
+        raw_id, raw_name = row[0], row[1]
 
-    game_id, official_name = await resolve_to_base_game(row[0], row[1])
+    # If game wasn't found in local multiplayer cache, fetch and store it from IGDB live
+    if not raw_id:
+        user_searching_dlc = any(char in clean_game for char in [":", "-", "–", "—"])
+        result = await fetch_and_cache_game_from_igdb(clean_game, allow_dlc=user_searching_dlc)
+        if not result:
+            await interaction.followup.send(
+                f"Could not find **{clean_game}** in local cache or on IGDB.",
+                ephemeral=not public
+            )
+            return
 
-    async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
-        users = await cursor.fetchall()
+        raw_id, raw_name = result
+
+    game_id, official_name = await resolve_to_base_game(raw_id, raw_name)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
+            users = await cursor.fetchall()
 
     if not users:
-        await interaction.response.send_message(f"No subscribers for **{official_name}**.", ephemeral=not public)
+        await interaction.followup.send(f"No subscribers for **{official_name}**.", ephemeral=not public)
         return
 
     local_mentions = [f"<@{u[0]}>" for u in users if interaction.guild.get_member(u[0])]
     if not local_mentions:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"No users in **{interaction.guild.name}** are subscribed to **{official_name}**.",
             ephemeral=not public
         )
         return
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"Players in this server interested in **{official_name}** ({len(local_mentions)}):\n{' '.join(local_mentions)}",
         ephemeral=not public,
         allowed_mentions=discord.AllowedMentions.none()
