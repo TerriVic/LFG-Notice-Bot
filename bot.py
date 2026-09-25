@@ -362,14 +362,11 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                                   AND (parent_game_id IS NULL OR parent_game_id = 0)
                                   AND (version_parent_id IS NULL OR version_parent_id = 0)
                                 ORDER BY total_rating_count DESC, id ASC
-                                LIMIT 25 \
+                                LIMIT 25
                                 """
                 async with db.execute(query_default) as cursor:
                     rows = await cursor.fetchall()
                     return [app_commands.Choice(name=r[0][:100], value=r[0][:100]) for r in rows if not GENERIC_DLC_PATTERN.search(r[0])]
-
-        user_explicitly_searching_dlc = any(char in clean_current for char in [":", "-", "–", "—"]) or \
-                                        any(k in clean_current.lower() for k in ["dlc", "expansion", "pack", "add-on"])
 
         choice_candidates = []
         seen_names = set()
@@ -400,7 +397,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
             ratio = difflib.SequenceMatcher(None, q_low, t_low).ratio()
             return (3, ratio)
 
-        # 2. LOCAL MULTIPLAYER SEARCH (Tier 1)
+        # 2. LOCAL SEARCH
         async with aiosqlite.connect(DB_PATH) as db:
             query_t1 = """
                        SELECT name, is_multiplayer, total_rating_count FROM igdb_games
@@ -409,32 +406,30 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                          AND (version_parent_id IS NULL OR version_parent_id = 0)
                          AND (name LIKE ? OR name LIKE ?)
                        ORDER BY is_multiplayer DESC, total_rating_count DESC
-                       LIMIT 25 \
+                       LIMIT 25
                        """
             params_t1 = (f"{clean_current}%", f"%{clean_current}%")
 
             async with db.execute(query_t1, params_t1) as cursor:
                 rows_t1 = await cursor.fetchall()
                 for name, is_mp, rating_cnt in rows_t1:
-                    if not user_explicitly_searching_dlc and any(c in name for c in [":", "-", "–", "—"]):
-                        continue
                     if not GENERIC_DLC_PATTERN.search(name) and name.lower() not in seen_names:
                         match_tier, similarity = compute_match_score(name, clean_current)
                         mp_prio = 0 if is_mp == 1 else 1
                         choice_candidates.append((match_tier, mp_prio, -similarity, -(rating_cnt or 0), name))
                         seen_names.add(name.lower())
 
-        # 3. LIVE IGDB SEARCH (Tier 2 - Fetches single-player / uncached games)
+# 3. LIVE IGDB SEARCH
         if len(clean_current) >= 3:
             client_id = os.getenv("TWITCH_CLIENT_ID")
             access_token = os.getenv("TWITCH_ACCESS_TOKEN")
 
             if client_id and access_token:
                 headers = {"Client-ID": client_id, "Authorization": f"Bearer {access_token}"}
-                body = f'fields name, total_rating_count, game_modes; search "{clean_current}"; where version_parent = null & parent_game = null; limit 15;'
+                body = f'fields name, total_rating_count, game_modes; search "{clean_current}"; limit 15;'
 
                 try:
-                    timeout = aiohttp.ClientTimeout(total=0.8)
+                    timeout = aiohttp.ClientTimeout(total=2.0)
                     async with aiohttp.ClientSession(timeout=timeout) as session:
                         async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
                             if resp.status == 200:
@@ -454,8 +449,6 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                                     is_mp = 1 if raw_mode_ids.intersection({2, 3, 4, 5, 6}) else 0
 
                                     if g_name.lower() in seen_names:
-                                        continue
-                                    if not user_explicitly_searching_dlc and any(c in g_name for c in [":", "-", "–", "—"]):
                                         continue
                                     if not GENERIC_DLC_PATTERN.search(g_name):
                                         match_tier, similarity = compute_match_score(g_name, clean_current)
@@ -818,33 +811,52 @@ async def show_subscribers(interaction: discord.Interaction, game: str, public: 
         await interaction.response.send_message("This command can only be used inside a server.", ephemeral=True)
         return
 
+    await interaction.response.defer(ephemeral=not public)
     clean_game = game.strip().replace("’", "'").replace("‘", "'")
+
+    raw_id = None
+    raw_name = None
+
+    # Keep database operations cleanly scoped or re-opened
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,)) as cursor:
             row = await cursor.fetchone()
 
-    if not row:
-        await interaction.response.send_message("Game not found.", ephemeral=True)
-        return
+    if row:
+        raw_id, raw_name = row[0], row[1]
 
-    game_id, official_name = await resolve_to_base_game(row[0], row[1])
+    # If game wasn't found in local multiplayer cache, fetch and store it from IGDB live
+    if not raw_id:
+        user_searching_dlc = any(char in clean_game for char in [":", "-", "–", "—"])
+        result = await fetch_and_cache_game_from_igdb(clean_game, allow_dlc=user_searching_dlc)
+        if not result:
+            await interaction.followup.send(
+                f"Could not find **{clean_game}** in local cache or on IGDB.",
+                ephemeral=not public
+            )
+            return
 
-    async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
-        users = await cursor.fetchall()
+        raw_id, raw_name = result
+
+    game_id, official_name = await resolve_to_base_game(raw_id, raw_name)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
+            users = await cursor.fetchall()
 
     if not users:
-        await interaction.response.send_message(f"No subscribers for **{official_name}**.", ephemeral=not public)
+        await interaction.followup.send(f"No subscribers for **{official_name}**.", ephemeral=not public)
         return
 
     local_mentions = [f"<@{u[0]}>" for u in users if interaction.guild.get_member(u[0])]
     if not local_mentions:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"No users in **{interaction.guild.name}** are subscribed to **{official_name}**.",
             ephemeral=not public
         )
         return
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"Players in this server interested in **{official_name}** ({len(local_mentions)}):\n{' '.join(local_mentions)}",
         ephemeral=not public,
         allowed_mentions=discord.AllowedMentions.none()
