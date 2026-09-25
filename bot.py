@@ -471,86 +471,136 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
     except (discord.NotFound, discord.HTTPException):
         return []
 
-# ---------------------------------------------------------
-# Autocomplete Helper Function
-# ---------------------------------------------------------
-async def game_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    """Fetch up to 25 matching games from the local IGDB database as the user types."""
-    if not current:
-        # Show top matches or empty list when user hasn't typed anything yet
-        cursor.execute("SELECT name FROM igdb_games LIMIT 25")
-    else:
-        # Perform a SQL LIKE query for fuzzy matching
-        cursor.execute(
-            "SELECT name FROM igdb_games WHERE name LIKE ? ORDER BY name ASC LIMIT 25",
-            (f"%{current}%",)
-        )
+async def autocomplete_admin_unsubscribe(interaction: discord.Interaction, current: str):
+    clean_current = current.strip().replace("’", "'").replace("‘", "'")
 
-    results = cursor.fetchall()
+    # Pull the target user directly from interaction namespace
+    target_user = interaction.namespace.user
 
-    # Return choices formatted for Discord's UI
+    # If the admin hasn't selected a user in the UI yet
+    if not target_user:
+        return [app_commands.Choice(name="Select a user first...", value="__NONE__")]
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+                """
+                SELECT g.name
+                FROM subscriptions s
+                         JOIN igdb_games g ON s.game_id = g.id
+                WHERE s.user_id = ? AND g.name LIKE ?
+                ORDER BY g.name ASC
+                LIMIT 25
+                """,
+                (target_user.id, f"%{clean_current}%")
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+    if not rows:
+        return [app_commands.Choice(name="User has no active subscriptions", value="__NONE__")]
+
     return [
-        app_commands.Choice(name=row[0], value=row[0])
-        for row in results
+        app_commands.Choice(name=row[0][:100], value=row[0][:100])
+        for row in rows
     ]
 
 # ---------------------------------------------------------
-# Admin Command Group with Autocomplete
+# Admin Command Group
 # ---------------------------------------------------------
 admin_group = app_commands.Group(name="admin", description="Admin-only bot management commands")
 
 @admin_group.command(name="subscribe_user", description="Force-subscribe a user to a game")
 @app_commands.checks.has_permissions(administrator=True)
 async def admin_subscribe(interaction: discord.Interaction, user: discord.User, game: str):
-    cursor.execute("SELECT id, name FROM igdb_games WHERE name = ? COLLATE NOCASE", (game,))
-    game_row = cursor.fetchone()
+    await interaction.response.defer(ephemeral=True)
+    clean_game = game.strip().replace("’", "'").replace("‘", "'")
 
-    if not game_row:
-        await interaction.response.send_message(f"Game '{game}' not found in catalog.", ephemeral=True)
-        return
+    raw_id = None
+    raw_name = None
 
-    game_id, game_name = game_row
+    async with aiosqlite.connect(DB_PATH) as db:
+        # 1. Check local catalog
+        async with db.execute("SELECT id, name FROM igdb_games WHERE name = ? COLLATE NOCASE", (clean_game,)) as cursor:
+            row = await cursor.fetchone()
 
-    cursor.execute(
-        "INSERT OR IGNORE INTO subscriptions (user_id, game_id) VALUES (?, ?)",
-        (user.id, game_id)
-    )
-    db.commit()
+        if row:
+            raw_id, raw_name = row[0], row[1]
 
-    await interaction.response.send_message(
-        f"✅ Subscribed {user.mention} to **{game_name}**.",
+    # 2. Live IGDB Fallback (Handles single-player games & DLCs via delimiters)
+    if not raw_id:
+            user_searching_dlc = any(char in clean_game for char in [":", "-", "–", "—"])
+            result = await fetch_and_cache_game_from_igdb(clean_game, allow_dlc=user_searching_dlc)
+            if not result:
+                await interaction.followup.send(
+                f"Could not find **{clean_game}** in local catalog or on IGDB.",
+                    ephemeral=True
+                )
+                return
+            raw_id, raw_name = result
+
+    # 3. Normalize special editions to base game
+    game_id, official_name = await resolve_to_base_game(raw_id, raw_name)
+
+    # 4. Insert subscription within a clean connection context
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO subscriptions (user_id, game_id) VALUES (?, ?)",
+            (user.id, game_id)
+        )
+        await db.commit()
+
+    await interaction.followup.send(
+        f"✅ Subscribed {user.mention} to **{official_name}**.",
         ephemeral=True
     )
-
-# Attach autocomplete to the 'game' parameter of admin_subscribe
-@admin_subscribe.autocomplete('game')
-async def admin_subscribe_game_autocomplete(interaction: discord.Interaction, current: str):
-    return await game_autocomplete(interaction, current)
 
 @admin_group.command(name="unsubscribe_user", description="Force-unsubscribe a user from a game")
 @app_commands.checks.has_permissions(administrator=True)
 async def admin_unsubscribe(interaction: discord.Interaction, user: discord.User, game: str):
-    cursor.execute("SELECT id, name FROM igdb_games WHERE name = ? COLLATE NOCASE", (game,))
-    game_row = cursor.fetchone()
-
-    if not game_row:
-        await interaction.response.send_message(f"Game '{game}' not found in catalog.", ephemeral=True)
+    if game == "__NONE__":
+        await interaction.response.send_message(
+            f"**{user.display_name}** has no active subscriptions to remove.",
+            ephemeral=True
+        )
         return
 
-    game_id, game_name = game_row
+    await interaction.response.defer(ephemeral=True)
+    clean_game = game.strip().replace("’", "'").replace("‘", "'")
 
-    cursor.execute("DELETE FROM subscriptions WHERE user_id = ? AND game_id = ?", (user.id, game_id))
-    db.commit()
+    raw_id = None
+    raw_name = None
 
-    await interaction.response.send_message(
-        f"🗑️ Unsubscribed {user.mention} from **{game_name}**.",
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id, name FROM igdb_games WHERE name = ? COLLATE NOCASE", (clean_game,)) as cursor:
+            row = await cursor.fetchone()
+
+        if row:
+            raw_id, raw_name = row[0], row[1]
+
+    if not raw_id:
+        user_searching_dlc = any(char in clean_game for char in [":", "-", "–", "—"])
+        result = await fetch_and_cache_game_from_igdb(clean_game, allow_dlc=user_searching_dlc)
+        if not result:
+            await interaction.followup.send(
+                f"Could not find **{clean_game}** in local catalog or on IGDB.",
+                ephemeral=True
+            )
+            return
+        raw_id, raw_name = result
+
+    game_id, official_name = await resolve_to_base_game(raw_id, raw_name)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM subscriptions WHERE user_id = ? AND game_id = ?", (user.id, game_id))
+        await db.commit()
+
+    await interaction.followup.send(
+        f"🗑️ Unsubscribed {user.mention} from **{official_name}**.",
         ephemeral=True
     )
 
-# Attach autocomplete to the 'game' parameter of admin_unsubscribe
-@admin_unsubscribe.autocomplete('game')
-async def admin_unsubscribe_game_autocomplete(interaction: discord.Interaction, current: str):
-    return await game_autocomplete(interaction, current)
+# Bind the subscriber-specific autocomplete function
+admin_subscribe.autocomplete('game')(autocomplete_games)
+admin_unsubscribe.autocomplete('game')(autocomplete_admin_unsubscribe)
 
 # REGISTRATION: Add the admin command group to the tree
 tree.add_command(admin_group)
@@ -844,26 +894,33 @@ async def unsubscribe(interaction: discord.Interaction, game: str):
 @app_commands.checks.cooldown(1, 30.0)
 @app_commands.autocomplete(game=autocomplete_games)
 async def ping_game(interaction: discord.Interaction, game: str):
+    # 1. Immediately tell Discord we are working on it to prevent timeouts
+    await interaction.response.defer()
+
     clean_game = game.strip().replace("’", "'").replace("‘", "'")
+
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,)) as cursor:
+        # 2. Look up game ID (case-insensitive)
+        async with db.execute("SELECT id, name FROM igdb_games WHERE name = ? COLLATE NOCASE", (clean_game,)) as cursor:
             row = await cursor.fetchone()
 
-    if not row:
-        await interaction.response.send_message("Game not found.")
-        return
+        if not row:
+            await interaction.followup.send("Game not found.")
+            return
 
-    game_id, official_name = await resolve_to_base_game(row[0], row[1])
+        # 3. Resolve base game entry
+        game_id, official_name = await resolve_to_base_game(row[0], row[1])
 
-    async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
-        users = await cursor.fetchall()
+        # 4. Fetch subscribers
+        async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
+            users = await cursor.fetchall()
 
     if not users:
-        await interaction.response.send_message(f"No subscribers for **{official_name}**.")
+        await interaction.followup.send(f"No subscribers for **{official_name}**.")
         return
 
     mentions = " ".join(f"<@{u[0]}>" for u in users)
-    await interaction.response.send_message(f"Players interested in **{official_name}**: {mentions}")
+    await interaction.followup.send(f"Players interested in **{official_name}**: {mentions}")
 
 @tree.command(name="user_subscriptions", description="View subscriptions for yourself or another user.")
 async def user_subscriptions(interaction: discord.Interaction, user: discord.User = None, public: bool = False):
