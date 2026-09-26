@@ -17,6 +17,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 # Setup persistent data path
 DATA_DIR = os.getenv("DATA_DIR", ".")
 DB_PATH = os.path.join(DATA_DIR, "db.sqlite")
+BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID"))
 
 # Ensure the data directory exists before opening SQLite
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -506,10 +507,16 @@ async def autocomplete_admin_unsubscribe(interaction: discord.Interaction, curre
 # ---------------------------------------------------------
 # Admin Command Group
 # ---------------------------------------------------------
+
+def is_bot_owner():
+    async def predicate(interaction: discord.Interaction) -> bool:
+        return interaction.user.id == BOT_OWNER_ID
+    return app_commands.check(predicate)
+
 admin_group = app_commands.Group(name="admin", description="Admin-only bot management commands")
 
 @admin_group.command(name="subscribe_user", description="Force-subscribe a user to a game")
-@app_commands.checks.has_permissions(administrator=True)
+@is_bot_owner()
 async def admin_subscribe(interaction: discord.Interaction, user: discord.User, game: str):
     await interaction.response.defer(ephemeral=True)
     clean_game = game.strip().replace("’", "'").replace("‘", "'")
@@ -554,7 +561,7 @@ async def admin_subscribe(interaction: discord.Interaction, user: discord.User, 
     )
 
 @admin_group.command(name="unsubscribe_user", description="Force-unsubscribe a user from a game")
-@app_commands.checks.has_permissions(administrator=True)
+@is_bot_owner()
 async def admin_unsubscribe(interaction: discord.Interaction, user: discord.User, game: str):
     if game == "__NONE__":
         await interaction.response.send_message(
@@ -636,7 +643,6 @@ async def autocomplete_user_subscriptions(interaction: discord.Interaction, curr
         )
         for row in rows
     ]
-
 
 async def fetch_and_cache_game_from_igdb(game_name: str, allow_dlc: bool = False) -> tuple[int, str] | None:
     client_id = os.getenv("TWITCH_CLIENT_ID")
@@ -1045,6 +1051,14 @@ async def help_command(interaction: discord.Interaction):
 
 @tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CheckFailure):
+        msg = "⛔ Only the bot owner can use administrative commands."
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+        return
+
     if isinstance(error, app_commands.CommandOnCooldown):
         seconds = round(error.retry_after)
         msg = f"⏳ Easy there! You can ping a game again in **{seconds} seconds**."
@@ -1085,5 +1099,3 @@ client.run(TOKEN)
 ##    print(f"Logged in as {client.user}")
 
 ## client.run(TOKEN)
-
-
