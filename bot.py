@@ -8,6 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
+import difflib
 
 # Load environment variables
 load_dotenv()
@@ -41,6 +42,8 @@ GENERIC_DLC_PATTERN = re.compile(
 
 # Cache for command IDs used by clickable help mentions
 COMMAND_IDS = {}
+
+NOISE_KEYWORDS = ["demake", "nokia", "flash", "collection", "bundle", "prototype", "edition"]
 
 def normalize_game_name(name: str) -> str:
     """Strips edition suffixes, standardizes mobile quotes, and removes trailing punctuation."""
@@ -348,11 +351,8 @@ async def update_igdb_catalog():
 async def before_catalog_update():
     await client.wait_until_ready()
 
-import difflib
-
 async def autocomplete_games(interaction: discord.Interaction, current: str):
     try:
-        # Strip quotes to prevent IGDB API 400 Bad Requests
         clean_current = current.strip().replace("’", "'").replace("‘", "'").replace('"', '')
 
         # 1. Default empty input handling
@@ -370,11 +370,23 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                     rows = await cursor.fetchall()
                     return [app_commands.Choice(name=r[0][:100], value=r[0][:100]) for r in rows if not GENERIC_DLC_PATTERN.search(r[0])]
 
+        # Detect DLC intent before stripping trailing punctuation
+        user_searching_dlc = any(char in clean_current for char in [":", "-", "–", "—"]) or \
+                             any(k in clean_current.lower() for k in ["dlc", "expansion", "pack", "add-on"])
+
+        # Strip trailing punctuation/spaces (e.g., "abiotic factor:" -> "abiotic factor")
+        search_term = re.sub(r'[:\-\–\—\s]+$', '', clean_current)
+        if not search_term:
+            search_term = clean_current
+
+        # Sanitize for IGDB API to prevent 400 Bad Request on colons/dashes
+        igdb_search_query = re.sub(r'[:\-\–\—]', ' ', search_term).strip()
+        igdb_search_query = re.sub(r'\s+', ' ', igdb_search_query)
+
         choice_candidates = []
         seen_names = set()
 
-        user_searching_dlc = any(char in clean_current for char in [":", "-", "–", "—"]) or \
-                             any(k in clean_current.lower() for k in ["dlc", "expansion", "pack", "add-on"])
+        user_wants_noise = any(k in search_term.lower() for k in NOISE_KEYWORDS)
 
         def compute_match_score(title: str, query: str) -> tuple[int, float]:
             t_low = title.lower().strip()
@@ -411,6 +423,23 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
             if match_tier == 3 and is_mp == 1: return 6  # MP Fuzzy
             return 7                                     # SP Fuzzy
 
+        def should_keep_candidate(name: str, rating_cnt: int, match_tier: int, similarity: float) -> bool:
+            name_low = name.lower()
+
+            # Filter unwanted keywords unless user searched for them explicitly
+            if not user_wants_noise and any(k in name_low for k in NOISE_KEYWORDS):
+                return False
+
+            # Drop weak fuzzy matches
+            if match_tier == 3 and similarity < 0.60:
+                return False
+
+            # Drop unrated shovelware/fan projects unless it's a direct prefix/exact match
+            if (not rating_cnt or rating_cnt == 0) and match_tier == 3:
+                return False
+
+            return True
+
         # 2. LOCAL SEARCH
         async with aiosqlite.connect(DB_PATH) as db:
             if user_searching_dlc:
@@ -420,7 +449,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                            ORDER BY is_multiplayer DESC, total_rating_count DESC
                            LIMIT 35
                            """
-                params_t1 = (f"{clean_current}%", f"%{clean_current}%")
+                params_t1 = (f"{search_term}%", f"%{search_term}%")
             else:
                 query_t1 = """
                        SELECT name, is_multiplayer, total_rating_count FROM igdb_games
@@ -431,46 +460,44 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                            ORDER BY is_multiplayer DESC, total_rating_count DESC
                            LIMIT 35
                        """
-                params_t1 = (f"{clean_current}%", f"%{clean_current}%")
+                params_t1 = (f"{search_term}%", f"%{search_term}%")
 
             async with db.execute(query_t1, params_t1) as cursor:
                 rows_t1 = await cursor.fetchall()
                 for name, is_mp, rating_cnt in rows_t1:
                     if (user_searching_dlc or not GENERIC_DLC_PATTERN.search(name)) and name.lower() not in seen_names:
-                        match_tier, similarity = compute_match_score(name, clean_current)
-                        sort_score = get_sort_score(match_tier, is_mp)
-                        choice_candidates.append((sort_score, -similarity, -(rating_cnt or 0), name))
-                        seen_names.add(name.lower())
+                        match_tier, similarity = compute_match_score(name, search_term)
+                        if should_keep_candidate(name, rating_cnt, match_tier, similarity):
+                            sort_score = get_sort_score(match_tier, is_mp)
+                            choice_candidates.append((sort_score, -similarity, -(rating_cnt or 0), name, is_mp))
+                            seen_names.add(name.lower())
 
             # 2b. EXPLICIT DB FETCH FOR EXACT MATCH
-            if clean_current.lower() not in seen_names:
+            if search_term.lower() not in seen_names:
                 query_exact = """
                               SELECT name, is_multiplayer, total_rating_count FROM igdb_games
                               WHERE name = ? COLLATE NOCASE
                               LIMIT 1
                               """
-                async with db.execute(query_exact, (clean_current,)) as cursor:
+                async with db.execute(query_exact, (search_term,)) as cursor:
                     exact_row = await cursor.fetchone()
                     if exact_row:
                         name, is_mp, rating_cnt = exact_row
-                        match_tier, similarity = compute_match_score(name, clean_current)
+                        match_tier, similarity = compute_match_score(name, search_term)
                         sort_score = get_sort_score(match_tier, is_mp)
-                        choice_candidates.append((sort_score, -similarity, -(rating_cnt or 0), name))
+                        choice_candidates.append((sort_score, -similarity, -(rating_cnt or 0), name, is_mp))
                         seen_names.add(name.lower())
 
 # 3. LIVE IGDB SEARCH
-        if len(clean_current) >= 2:
+        if len(search_term) >= 2:
             client_id = os.getenv("TWITCH_CLIENT_ID")
             access_token = os.getenv("TWITCH_ACCESS_TOKEN")
 
             if client_id and access_token:
                 headers = {"Client-ID": client_id, "Authorization": f"Bearer {access_token}"}
-
-                # We request parent_game and version_parent explicitly so they don't clog up the 35 slots
-                body = f'fields name, total_rating_count, game_modes, category, parent_game, version_parent; search "{clean_current}"; limit 35;'
+                body = f'fields name, total_rating_count, game_modes, category, parent_game, version_parent; search "{igdb_search_query}"; limit 35;'
 
                 try:
-                    # Extended timeout to 2.5s to give IGDB breathing room
                     timeout = aiohttp.ClientTimeout(total=2.5)
                     async with aiohttp.ClientSession(timeout=timeout) as session:
                         async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
@@ -488,7 +515,6 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                                     p_game = get_id(item.get("parent_game"))
                                     v_parent = get_id(item.get("version_parent"))
 
-                                    # Handle edition/parent filtering safely in Python
                                     if not user_searching_dlc:
                                         if cat not in {0, 8, 9, 10, 11} or p_game is not None or v_parent is not None:
                                             continue
@@ -505,24 +531,30 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                                     if g_name.lower() in seen_names:
                                         continue
                                     if user_searching_dlc or not GENERIC_DLC_PATTERN.search(g_name):
-                                        match_tier, similarity = compute_match_score(g_name, clean_current)
-                                        sort_score = get_sort_score(match_tier, is_mp)
-                                        choice_candidates.append((sort_score, -similarity, -(r_cnt or 0), g_name))
-                                        seen_names.add(g_name.lower())
-                            else:
-                                print(f"IGDB Search Error: {resp.status} - {await resp.text()}")
+                                        match_tier, similarity = compute_match_score(g_name, search_term)
+                                        if should_keep_candidate(g_name, r_cnt, match_tier, similarity):
+                                            sort_score = get_sort_score(match_tier, is_mp)
+                                            choice_candidates.append((sort_score, -similarity, -(r_cnt or 0), g_name, is_mp))
+                                            seen_names.add(g_name.lower())
                 except Exception as e:
                     print(f"IGDB Autocomplete Exception: {e}")
                     pass
 
-        # 4. REFINED SORTING PRIORITY:
-        # Prio 1: The Unified Sort Score (x[0])
-        # Prio 2: Higher Similarity Ratio (x[1])
-        # Prio 3: Higher Popularity Rating Count (x[2])
-        # Prio 4: Shorter Title Length (len(x[3]))
+        # 4. SORTING & DISCORD CHOICE GENERATION
         choice_candidates.sort(key=lambda x: (x[0], x[1], x[2], len(x[3])))
 
-        return [app_commands.Choice(name=item[3][:100], value=item[3][:100]) for item in choice_candidates[:25]]
+        choices = []
+        for item in choice_candidates[:25]:
+            g_name = item[3]
+            is_mp = item[4]
+
+            # Add visual indicator ONLY if single-player
+            display_name = f"{g_name} [SP 👤]" if is_mp == 0 else g_name
+
+            # name = what appears in the dropdown, value = raw title sent to command
+            choices.append(app_commands.Choice(name=display_name[:100], value=g_name[:100]))
+
+        return choices
 
     except (discord.NotFound, discord.HTTPException):
         return []
