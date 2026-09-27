@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from database import init_db, auto_migrate_multiplayer_flags
-from cogs.admin_cmds import admin_group
+from cogs.admin_cmds import admin_group, owner_group
 from cogs.background_tasks import update_igdb_catalog, update_live_top_games_loop
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -34,8 +34,9 @@ class GameBot(commands.Bot):
         # Load cog extension
         await self.load_extension("cogs.user_cmds")
 
-        # Register admin command group
+        # Register administrative groups
         self.tree.add_command(admin_group)
+        self.tree.add_command(owner_group)
 
         # Launch automatic DB classification and purge in background
         asyncio.create_task(auto_migrate_multiplayer_flags())
@@ -50,9 +51,7 @@ class GameBot(commands.Bot):
         synced = await self.tree.sync()
         print(f"Synced {len(synced)} global command(s)")
 
-
 client = GameBot(command_prefix="!", intents=intents)
-
 
 @update_igdb_catalog.before_loop
 async def before_catalog_update():
