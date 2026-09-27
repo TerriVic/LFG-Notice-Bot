@@ -61,7 +61,7 @@ async def before_catalog_update():
 @client.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CheckFailure):
-        msg = "⛔ Only the bot owner can use administrative commands."
+        msg = "⛔ You do not have permission to run this administrative command."
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
         else:
@@ -70,9 +70,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
     if isinstance(error, app_commands.CommandOnCooldown):
         seconds = round(error.retry_after)
-        msg = f"⏳ Easy there! You can ping a game again in **{seconds} seconds**."
-
-        # Check if the interaction was already responded to or deferred
+        msg = f"⏳ Easy there! You can use this command again in **{seconds} seconds**."
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
         else:

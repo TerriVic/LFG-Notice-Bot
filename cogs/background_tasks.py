@@ -136,17 +136,16 @@ async def update_igdb_catalog():
 
 async def refresh_live_top_games(bot: discord.Client):
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT guild_id, channel_id, message_id FROM live_top_games") as cursor:
+        async with db.execute("SELECT message_id, guild_id, channel_id, entry_limit FROM live_top_games") as cursor:
             tracked = await cursor.fetchall()
 
         if not tracked:
             return
 
-        # Fetch active subscriptions
         async with db.execute("SELECT s.user_id, g.name FROM subscriptions s JOIN igdb_games g ON s.game_id = g.id") as cursor:
             sub_rows = await cursor.fetchall()
 
-        for guild_id, channel_id, message_id in tracked:
+        for message_id, guild_id, channel_id, entry_limit in tracked:
             guild = bot.get_guild(guild_id)
             if not guild:
                 continue
@@ -158,12 +157,12 @@ async def refresh_live_top_games(bot: discord.Client):
             try:
                 message = await channel.fetch_message(message_id)
             except (discord.NotFound, discord.Forbidden):
-                # Clean up stale DB entry if message or permissions were lost
-                await db.execute("DELETE FROM live_top_games WHERE guild_id = ?", (guild_id,))
+                # Target message was deleted or channel permissions lost
+                await db.execute("DELETE FROM live_top_games WHERE message_id = ?", (message_id,))
                 await db.commit()
                 continue
 
-            # Calculate game subscriber counts for members in this guild
+            # Calculate game counts for users in this guild
             game_counts = {}
             for user_id, game_name in sub_rows:
                 if guild.get_member(user_id):
@@ -172,7 +171,8 @@ async def refresh_live_top_games(bot: discord.Client):
             if not game_counts:
                 description = "No active game subscriptions in this server."
             else:
-                sorted_games = sorted(game_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+                # Limit per message configuration
+                sorted_games = sorted(game_counts.items(), key=lambda x: x[1], reverse=True)[:entry_limit]
                 formatted_list = [
                     f"`#{idx + 1}` **{gname}** — {cnt} {'subscriber' if cnt == 1 else 'subscribers'}"
                     for idx, (gname, cnt) in enumerate(sorted_games)
@@ -180,14 +180,14 @@ async def refresh_live_top_games(bot: discord.Client):
                 description = "\n".join(formatted_list)
 
             embed = discord.Embed(
-                title=f"📊 Live Top Games in {guild.name}",
+                title=f"📊 Live Top {entry_limit} Games in {guild.name}",
                 description=description,
-                color=discord.Color.gold()
+                color=discord.Color.green()
             )
             embed.set_footer(text="Updates automatically every hour")
 
             await message.edit(content=None, embed=embed)
 
-@tasks.loop(hours=1)
+@tasks.loop(minutes=30)
 async def update_live_top_games_loop(bot: discord.Client):
     await refresh_live_top_games(bot)
