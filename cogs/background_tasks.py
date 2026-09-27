@@ -200,7 +200,7 @@ async def refresh_live_top_games(
             embed = discord.Embed(
                 title=f"📊 Live Top {entry_limit} Games in {guild.name}",
                 description=description,
-                color=discord.Color.gold()
+                color=discord.Color.green()
             )
 
             await message.edit(content=None, embed=embed)
