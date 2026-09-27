@@ -58,9 +58,11 @@ async def init_db():
         async with db.execute("PRAGMA table_info(live_top_games);") as cursor:
             columns = [col[1] for col in await cursor.fetchall()]
 
-        if columns and "entry_limit" not in columns:
-            print("[DB Setup] Upgrading live_top_games table schema...")
-            await db.execute("DROP TABLE live_top_games;")
+        if columns:
+            if "update_interval" not in columns:
+                await db.execute("ALTER TABLE live_top_games ADD COLUMN update_interval INTEGER DEFAULT 1;")
+            if "last_updated" not in columns:
+                await db.execute("ALTER TABLE live_top_games ADD COLUMN last_updated INTEGER DEFAULT 0;")
 
         await db.execute("""
                          CREATE TABLE IF NOT EXISTS live_top_games (
@@ -68,6 +70,8 @@ async def init_db():
                                                                        guild_id INTEGER NOT NULL,
                                                                        channel_id INTEGER NOT NULL,
                                                                        entry_limit INTEGER DEFAULT 10,
+                                                                       update_interval INTEGER DEFAULT 1,
+                                                                       last_updated INTEGER DEFAULT 0,
                                                                        created_at INTEGER DEFAULT (strftime('%s', 'now'))
                          );
                          """)

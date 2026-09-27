@@ -1,5 +1,6 @@
 import os
 import time
+import typing
 
 import aiosqlite
 import discord
@@ -75,7 +76,12 @@ async def autocomplete_live_messages(interaction: discord.Interaction, current: 
 
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-                "SELECT message_id, channel_id, entry_limit, created_at FROM live_top_games WHERE guild_id = ? ORDER BY created_at DESC",
+            """
+            SELECT message_id, channel_id, entry_limit, update_interval, created_at 
+            FROM live_top_games 
+            WHERE guild_id = ? 
+            ORDER BY created_at DESC
+            """,
                 (interaction.guild.id,)
         ) as cursor:
             rows = await cursor.fetchall()
@@ -84,20 +90,13 @@ async def autocomplete_live_messages(interaction: discord.Interaction, current: 
         return [app_commands.Choice(name="No active live top game messages found", value="__NONE__")]
 
     choices = []
-    for msg_id, ch_id, limit, created_at in rows:
+    for msg_id, ch_id, limit, interval, created_at in rows:
         channel = interaction.guild.get_channel(ch_id)
         channel_name = f"#{channel.name}" if channel else f"Channel {ch_id}"
 
-        # Format the timestamp into a readable plain-text date/time
-        if created_at:
-            time_str = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(created_at))
-        else:
-            time_str = "Unknown date"
+        time_str = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(created_at)) if created_at else "Unknown date"
+        label = f"{time_str} | {channel_name} | Top {limit} ({interval}h) | ID: {msg_id}"
 
-        # Construct autocomplete label with timestamp, channel, limit, and message ID
-        label = f"{time_str} | {channel_name} | Top {limit} | ID: {msg_id}"
-
-        # Match search input against timestamp, channel, or message ID
         if not current or current.lower() in label.lower() or current in str(msg_id):
             choices.append(app_commands.Choice(name=label[:100], value=str(msg_id)))
 
@@ -315,16 +314,20 @@ async def admin_overview(interaction: discord.Interaction):
         await interaction.followup.send(embed=extra_embed, ephemeral=True)
 
 @admin_group.command(name="setup_top_games", description="Post a live-updating top games message in this channel")
-@app_commands.describe(limit="Number of top games to display in this list (default: 10, max: 25)")
+@app_commands.describe(
+    limit="Number of top games to display (1-25, default: 10)",
+    interval="How often to refresh in hours (1-168, default: 1)"
+)
 @is_owner_or_admin()
-async def setup_top_games(interaction: discord.Interaction, limit: int = 10):
+async def setup_top_games(interaction: discord.Interaction, limit: int = 10, interval: int = 1):
     if not interaction.guild:
         await interaction.response.send_message("This command must be run inside a server.", ephemeral=True)
         return
 
     clean_limit = max(1, min(limit, 25))
+    clean_interval = max(1, min(interval, 168))  # Limit interval between 1h and 1 week (168h)
 
-    # 1. Check if a tracker already exists in this server
+    # 1. Check for existing tracker confirmation
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT channel_id, created_at FROM live_top_games WHERE guild_id = ? ORDER BY created_at DESC LIMIT 1",
@@ -332,66 +335,53 @@ async def setup_top_games(interaction: discord.Interaction, limit: int = 10):
         ) as cursor:
             existing = await cursor.fetchone()
 
-    # 2. Ask for confirmation if a tracker exists
     if existing:
         ch_id, created_at = existing
         time_formatted = f"<t:{created_at}:f> (<t:{created_at}:R>)" if created_at else "an unknown date"
-        channel_mention = f"<#{ch_id}>"
-
         view = ConfirmDuplicateSetupView(author_id=interaction.user.id)
         await interaction.response.send_message(
-            f"⚠️ A live top games tracker already exists in {channel_mention}, sent on {time_formatted}.\n"
+            f"⚠️ A live top games tracker already exists in <#{ch_id}>, sent on {time_formatted}.\n"
             "Are you sure you want to create another one?",
             view=view,
             ephemeral=True
         )
 
-        # Wait for the user to click Confirm, Cancel, or let it time out
         await view.wait()
 
-        if view.value is not True:
-            if view.value is None:  # Timed out
+        if view.value:
+            if view.value is None:
                 try:
-                    await interaction.edit_original_response(
-                        content="⏳ Setup timed out. Action canceled.",
-                        view=None
-                    )
+                    await interaction.edit_original_response(content="⏳ Setup timed out.", view=None)
                 except Exception:
                     pass
             return
 
-        # Clear buttons from confirmation prompt before creating message
-        await interaction.edit_original_response(
-            content="⏳ Creating new live top games tracker...",
-            view=None
-        )
+        await interaction.edit_original_response(content="⏳ Creating new tracker...", view=None)
     else:
         await interaction.response.defer(ephemeral=True)
 
-    # 3. Create placeholder and initialize top games tracker
-    embed = discord.Embed(
-        title=f"📊 Live Top {clean_limit} Games",
-        description="Initializing live updates...",
-        color=discord.Color.gold()
-    )
+    # 2. Post placeholder message & insert into database
+    embed = discord.Embed(title=f"📊 Live Top {clean_limit} Games", description="Initializing...", color=discord.Color.gold())
     message = await interaction.channel.send(embed=embed)
 
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 """
-                INSERT INTO live_top_games (message_id, guild_id, channel_id, entry_limit, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO live_top_games (message_id, guild_id, channel_id, entry_limit, update_interval, last_updated, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (message.id, interaction.guild.id, interaction.channel.id, clean_limit, int(time.time()))
+                (message.id, interaction.guild.id, interaction.channel.id, clean_limit, clean_interval, 0, int(time.time()))
             )
             await db.commit()
 
-        await refresh_live_top_games(interaction.client)
-        await interaction.followup.send(f"✅ Live top games tracker (Top {clean_limit}) posted!", ephemeral=True)
-
+        await refresh_live_top_games(interaction.client, force=True)
+        await interaction.followup.send(
+            f"✅ Live top games tracker posted! (Top {clean_limit}, updates every {clean_interval}h)",
+            ephemeral=True
+        )
     except Exception as e:
-        print(f"[Setup Error] Failed to initialize live top games: {e}")
+        print(f"[Setup Error] {e}")
         try:
             await message.delete()
         except Exception:
@@ -437,11 +427,11 @@ async def remove_top_games(interaction: discord.Interaction, message: str):
 
     await interaction.followup.send("🗑️ Live top games tracker removed successfully.", ephemeral=True)
 
-@admin_group.command(name="edit_top_games", description="Edit the entry limit of an existing live top games tracker")
-@app_commands.describe(message="Select the tracker message to edit", limit="New number of top games to display (1-25)")
+@admin_group.command(name="force_update_top_games", description="Force an immediate refresh on a live top games tracker")
+@app_commands.describe(message="Select the tracker message to refresh")
 @app_commands.autocomplete(message=autocomplete_live_messages)
 @is_owner_or_admin()
-async def edit_top_games(interaction: discord.Interaction, message: str, limit: int):
+async def force_update_top_games(interaction: discord.Interaction, message: str):
     if message == "__NONE__":
         await interaction.response.send_message("No live tracker message selected.", ephemeral=True)
         return
@@ -454,18 +444,90 @@ async def edit_top_games(interaction: discord.Interaction, message: str, limit: 
         await interaction.followup.send("Invalid message selection.", ephemeral=True)
         return
 
-    clean_limit = max(1, min(limit, 25))
-
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute("UPDATE live_top_games SET entry_limit = ? WHERE message_id = ?", (clean_limit, target_msg_id))
-        await db.commit()
+        async with db.execute("SELECT message_id FROM live_top_games WHERE message_id = ?", (target_msg_id,)) as cursor:
+            row = await cursor.fetchone()
 
-        if cursor.rowcount == 0:
+        if not row:
             await interaction.followup.send("Tracker message not found in database.", ephemeral=True)
             return
 
-    await refresh_live_top_games(interaction.client)
-    await interaction.followup.send(f"✅ Tracker message updated to show **Top {clean_limit}** games!", ephemeral=True)
+    # Trigger targeted force refresh
+    await refresh_live_top_games(interaction.client, force=True, target_message_id=target_msg_id)
+    await interaction.followup.send("Live top games tracker refreshed successfully!", ephemeral=True)
+
+
+# --- Edit Command (with Force-Update Fallback) ---
+@admin_group.command(name="edit_top_games", description="Edit tracker settings or force a refresh if options are left empty")
+@app_commands.describe(
+    message="Select the tracker message to edit",
+    limit="New number of top games to display (1-25, optional)",
+    interval="New update frequency in hours (1-168, optional)"
+)
+@app_commands.autocomplete(message=autocomplete_live_messages)
+@is_owner_or_admin()
+async def edit_top_games(
+    interaction: discord.Interaction,
+    message: str,
+    limit: typing.Optional[int] = None,
+    interval: typing.Optional[int] = None
+):
+    if message == "__NONE__":
+        await interaction.response.send_message("No live tracker message selected.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        target_msg_id = int(message)
+    except ValueError:
+        await interaction.followup.send("Invalid message selection.", ephemeral=True)
+        return
+
+    # Fallback: If no settings were changed, perform a force update on this tracker
+    if limit is None and interval is None:
+        await refresh_live_top_games(interaction.client, force=True, target_message_id=target_msg_id)
+        await interaction.followup.send(
+            "No configuration changes requested. Live tracker force-refreshed!",
+            ephemeral=True
+        )
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT entry_limit, update_interval FROM live_top_games WHERE message_id = ?",
+            (target_msg_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            await interaction.followup.send("Tracker message not found in database.", ephemeral=True)
+            return
+
+        current_limit, current_interval = row
+
+        new_limit = max(1, min(limit, 25)) if limit is not None else current_limit
+        new_interval = max(1, min(interval, 168)) if interval is not None else current_interval
+
+        await db.execute(
+            "UPDATE live_top_games SET entry_limit = ?, update_interval = ? WHERE message_id = ?",
+            (new_limit, new_interval, target_msg_id)
+        )
+        await db.commit()
+
+    # Trigger targeted refresh with new settings
+    await refresh_live_top_games(interaction.client, force=True, target_message_id=target_msg_id)
+
+    changes = []
+    if limit is not None:
+        changes.append(f"Limit ➔ **Top {new_limit}**")
+    if interval is not None:
+        changes.append(f"Interval ➔ **Every {new_interval}h**")
+
+    await interaction.followup.send(
+        f"✅ Tracker message updated successfully! ({', '.join(changes)})",
+        ephemeral=True
+    )
 
 
 # Bind the subscriber-specific autocomplete function
