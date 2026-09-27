@@ -694,6 +694,16 @@ async def admin_unsubscribe(interaction: discord.Interaction, user: discord.User
         ephemeral=True
     )
 
+@admin_group.command(name="delete_user_data", description="Permanently delete all subscription data for a specific user")
+@is_bot_owner()
+async def admin_delete_user_data(interaction: discord.Interaction, user: discord.User):
+    view = ConfirmDataDeletionView(target_user_id=user.id, author_id=interaction.user.id)
+    await interaction.response.send_message(
+        f"⚠️ **Are you sure you want to delete all data for {user.mention}?**\nThis will permanently purge all their active subscriptions.",
+        view=view,
+        ephemeral=True
+    )
+
 # Bind the subscriber-specific autocomplete function
 admin_subscribe.autocomplete('game')(autocomplete_games)
 admin_unsubscribe.autocomplete('game')(autocomplete_admin_unsubscribe)
@@ -831,13 +841,15 @@ async def resolve_to_base_game(game_id: int, official_name: str) -> tuple[int, s
 
 
 class ConfirmDataDeletionView(discord.ui.View):
-    def __init__(self, target_user_id: int):
+    def __init__(self, target_user_id: int, author_id: int = None):
         super().__init__(timeout=30.0)
         self.target_user_id = target_user_id
+        # Author is the person allowed to interact with buttons (defaults to target user)
+        self.author_id = author_id if author_id is not None else target_user_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         # Ensures only the user who ran the command can press the buttons
-        if interaction.user.id != self.target_user_id:
+        if interaction.user.id != self.author_id:
             await interaction.response.send_message("You cannot use these buttons.", ephemeral=True)
             return False
         return True
@@ -845,26 +857,23 @@ class ConfirmDataDeletionView(discord.ui.View):
     @discord.ui.button(label="Confirm Deletion", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("DELETE FROM subscriptions WHERE user_id = ?", (interaction.user.id,))
+            await db.execute("DELETE FROM subscriptions WHERE user_id = ?", (self.target_user_id,))
             await db.commit()
 
-        # Disable all buttons in the view
-        for child in self.children:
-            child.disabled = True
-
+        # Stop listening to further events and remove the buttons from the message
+        self.stop()
         await interaction.response.edit_message(
-            content="**All your data has been permanently deleted from our database.**",
-            view=self
+            content=f"**All subscription data for <@{self.target_user_id}> has been permanently deleted.**",
+            view=None
         )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
-        for child in self.children:
-            child.disabled = True
-
+        # Stop listening to further events and remove the buttons from the message
+        self.stop()
         await interaction.response.edit_message(
             content="Action canceled. Your data gets to live another day.",
-            view=self
+            view=None
         )
 
 @tree.command(name="top_games", description="Show the top games on the server by subscription count")
@@ -1029,16 +1038,23 @@ async def user_subscriptions(interaction: discord.Interaction, user: discord.Use
         ) as cursor:
             rows = await cursor.fetchall()
 
-    header = "Your subscribed games" if target_user.id == interaction.user.id else f"Subscribed games for **{target_user.display_name}**"
+    # Use the mention syntax directly in the header
+    header = "Your subscribed games" if target_user.id == interaction.user.id else f"Subscribed games for {target_user.mention}"
+
     if not rows:
-        await interaction.response.send_message("No active subscriptions found.", ephemeral=not public)
+        await interaction.response.send_message(
+            f"No active subscriptions found for {target_user.mention}.",
+            ephemeral=not public,
+            allowed_mentions=discord.AllowedMentions.none()  # Suppresses the ping
+        )
         return
 
     game_list = "\n".join(f"• {row[0]}" for row in rows)
 
     await interaction.response.send_message(
         f"**{header}** ({len(rows)}):\n{game_list}",
-        ephemeral=not public
+        ephemeral=not public,
+        allowed_mentions=discord.AllowedMentions.none()  # Suppresses the ping
     )
 
 @tree.command(name="show_subscribers", description="View all users in this server subscribed to a game without pinging them")
