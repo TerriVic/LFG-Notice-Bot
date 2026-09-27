@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+import typing
 
 import aiohttp
 import aiosqlite
@@ -133,9 +134,22 @@ async def update_igdb_catalog():
 
         print(f"[IGDB Sync] Finished catalog sync. Added/Updated {total_upserted} games across {page_count} batches.")
 
-async def refresh_live_top_games(bot: discord.Client):
+async def refresh_live_top_games(
+    bot: discord.Client,
+    force: bool = False,
+    target_message_id: typing.Optional[int] = None
+):
+    now = int(time.time())
+
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT message_id, guild_id, channel_id, entry_limit FROM live_top_games") as cursor:
+        if target_message_id:
+            query = "SELECT message_id, guild_id, channel_id, entry_limit, update_interval, last_updated FROM live_top_games WHERE message_id = ?"
+            params = (target_message_id,)
+        else:
+            query = "SELECT message_id, guild_id, channel_id, entry_limit, update_interval, last_updated FROM live_top_games"
+            params = ()
+
+        async with db.execute(query, params) as cursor:
             tracked = await cursor.fetchall()
 
         if not tracked:
@@ -144,7 +158,12 @@ async def refresh_live_top_games(bot: discord.Client):
         async with db.execute("SELECT s.user_id, g.name FROM subscriptions s JOIN igdb_games g ON s.game_id = g.id") as cursor:
             sub_rows = await cursor.fetchall()
 
-        for message_id, guild_id, channel_id, entry_limit in tracked:
+        for message_id, guild_id, channel_id, entry_limit, update_interval, last_updated in tracked:
+            # Skip if interval has not elapsed yet (unless forced or targeted)
+            elapsed_seconds = now - (last_updated or 0)
+            if not force and target_message_id is None and elapsed_seconds < (update_interval * 3600):
+                continue
+
             guild = bot.get_guild(guild_id)
             if not guild:
                 continue
@@ -156,12 +175,10 @@ async def refresh_live_top_games(bot: discord.Client):
             try:
                 message = await channel.fetch_message(message_id)
             except (discord.NotFound, discord.Forbidden):
-                # Target message was deleted or channel permissions lost
                 await db.execute("DELETE FROM live_top_games WHERE message_id = ?", (message_id,))
                 await db.commit()
                 continue
 
-            # Calculate game counts for users in this guild
             game_counts = {}
             for user_id, game_name in sub_rows:
                 if guild.get_member(user_id):
@@ -170,7 +187,6 @@ async def refresh_live_top_games(bot: discord.Client):
             if not game_counts:
                 description = "No active game subscriptions in this server."
             else:
-                # Limit per message configuration
                 sorted_games = sorted(game_counts.items(), key=lambda x: x[1], reverse=True)[:entry_limit]
                 formatted_list = [
                     f"`#{idx + 1}` **{gname}** — {cnt} {'subscriber' if cnt == 1 else 'subscribers'}"
@@ -178,15 +194,21 @@ async def refresh_live_top_games(bot: discord.Client):
                 ]
                 description = "\n".join(formatted_list)
 
+            interval_str = f"every {update_interval} hour" if update_interval == 1 else f"every {update_interval} hours"
+            description += f"\n\n*Last updated <t:{now}:R> • Schedule: {interval_str}*"
+
             embed = discord.Embed(
                 title=f"📊 Live Top {entry_limit} Games in {guild.name}",
                 description=description,
-                color=discord.Color.green()
+                color=discord.Color.gold()
             )
-            embed.set_footer(text="Updates automatically every hour")
 
             await message.edit(content=None, embed=embed)
 
-@tasks.loop(minutes=30)
+            await db.execute("UPDATE live_top_games SET last_updated = ? WHERE message_id = ?", (now, message_id))
+            await db.commit()
+
+
+@tasks.loop(hours=1)
 async def update_live_top_games_loop(bot: discord.Client):
-    await refresh_live_top_games(bot)
+    await refresh_live_top_games(bot, force=False)

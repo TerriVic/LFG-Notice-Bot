@@ -329,7 +329,7 @@ class UserCommands(commands.Cog):
             name="Server Activity & Social",
             value=(
                 f"• {fmt('ping_game')} `<game>` — Ping subscribers.\n"
-                f"• {fmt('top_games')} — View popular server games.\n"
+                f"• {fmt('top_games')} `[limit] [public]` — View popular server games.\n"
                 f"• {fmt('show_subscribers')} `<game>` — List subscribers."
             ),
             inline=False
@@ -341,14 +341,18 @@ class UserCommands(commands.Cog):
             inline=False
         )
 
-        # Conditionally display admin section if user has Administrator permissions
+
+                # Conditionally display admin section if user has Administrator permissions
         is_admin = interaction.permissions and interaction.permissions.administrator
         if is_admin:
+            # Visual separator line (only appears for admins/owners)
+            embed.add_field(name="\u200b", value="─────────────────────────────", inline=False)
             embed.add_field(
                 name="Server Administration",
                 value=(
-                    f"• {fmt('admin', 'setup_top_games')} `[limit]` — Post a live-updating top games message.\n"
-                    f"• {fmt('admin', 'edit_top_games')} `<message>` `<limit>` — Edit the display limit of a live tracker.\n"
+                    f"• {fmt('admin', 'setup_top_games')} `[limit] [interval]` — Post a live-updating top games message.\n"
+                    f"• {fmt('admin', 'edit_top_games')} `<message> [limit] [interval]` — Edit tracker settings (or force refresh if options left empty).\n"
+                    f"• {fmt('admin', 'force_update_top_games')} `<message>` — Force an immediate refresh on a live tracker.\n"
                     f"• {fmt('admin', 'remove_top_games')} `<message>` — Remove an active live tracker."
                 ),
                 inline=False
@@ -361,4 +365,3 @@ class UserCommands(commands.Cog):
 # This setup function is required at the bottom of every Cog file
 async def setup(bot):
     await bot.add_cog(UserCommands(bot))
-
