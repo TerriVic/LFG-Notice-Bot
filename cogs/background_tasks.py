@@ -13,7 +13,6 @@ from utils import (
     GENERIC_DLC_PATTERN
 )
 
-
 @tasks.loop(hours=168)
 async def update_igdb_catalog():
     print("[IGDB Sync] Starting catalog sync...")
