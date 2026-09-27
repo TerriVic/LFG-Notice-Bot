@@ -1,6 +1,6 @@
 # LFG Notice Bot
 
-"Hi! I allow you to subscribe to a list of games, and when one of those games is mentioned, you will also be automatically tagged so you can team up and start playing with people."
+_"Hi! I allow you to subscribe to a list of games, and when one of those games is mentioned, you will also be automatically tagged so you can team up and start playing with people."_
 
 A feature-rich Discord slash-command bot built with Python and `discord.py` that allows server members to subscribe to their favorite games and receive targeted pings when others are looking for a group (LFG)[cite: 9, 10]. Powered by the IGDB database for comprehensive game search and metadata caching.
 
