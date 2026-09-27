@@ -18,13 +18,11 @@ def get_bot_owner_id() -> int:
     raw_owner_id = os.getenv("BOT_OWNER_ID")
     return int(raw_owner_id) if raw_owner_id and raw_owner_id.isdigit() else 0
 
-# --- Check 1: STRICTLY BOT OWNER ONLY ---
 def is_bot_owner():
     async def predicate(interaction: discord.Interaction) -> bool:
         return interaction.user.id == get_bot_owner_id()
     return app_commands.check(predicate)
 
-# --- Check 2: BOT OWNER OR SERVER ADMIN ---
 def is_owner_or_admin():
     async def predicate(interaction: discord.Interaction) -> bool:
         # 1. Allow Bot Owner anywhere
@@ -104,6 +102,37 @@ async def autocomplete_live_messages(interaction: discord.Interaction, current: 
             choices.append(app_commands.Choice(name=label[:100], value=str(msg_id)))
 
     return choices[:25]
+
+class ConfirmDuplicateSetupView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=60.0)
+        self.author_id = author_id
+        self.value: bool | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("You cannot use these buttons.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Create Tracker Anyway", style=discord.ButtonStyle.primary)
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        self.value = True
+        self.stop()
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        self.value = False
+        self.stop()
+        await interaction.response.edit_message(
+            content="❌ Setup canceled. No new tracker message was posted.",
+            view=None
+        )
+
+    async def on_timeout(self):
+        self.value = None
+        self.stop()
 
 admin_group = app_commands.Group(name="admin", description="Admin-only bot management commands")
 
@@ -215,10 +244,53 @@ async def setup_top_games(interaction: discord.Interaction, limit: int = 10):
         await interaction.response.send_message("This command must be run inside a server.", ephemeral=True)
         return
 
-    await interaction.response.defer(ephemeral=True)
     clean_limit = max(1, min(limit, 25))
 
-    # Send initial placeholder message
+    # 1. Check if a tracker already exists in this server
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT channel_id, created_at FROM live_top_games WHERE guild_id = ? ORDER BY created_at DESC LIMIT 1",
+            (interaction.guild.id,)
+        ) as cursor:
+            existing = await cursor.fetchone()
+
+    # 2. Ask for confirmation if a tracker exists
+    if existing:
+        ch_id, created_at = existing
+        time_formatted = f"<t:{created_at}:f> (<t:{created_at}:R>)" if created_at else "an unknown date"
+        channel_mention = f"<#{ch_id}>"
+
+        view = ConfirmDuplicateSetupView(author_id=interaction.user.id)
+        await interaction.response.send_message(
+            f"⚠️ A live top games tracker already exists in {channel_mention}, sent on {time_formatted}.\n"
+            "Are you sure you want to create another one?",
+            view=view,
+            ephemeral=True
+        )
+
+        # Wait for the user to click Confirm, Cancel, or let it time out
+        await view.wait()
+
+        if view.value is not True:
+            if view.value is None:  # Timed out
+                try:
+                    await interaction.edit_original_response(
+                        content="⏳ Setup timed out. Action canceled.",
+                        view=None
+                    )
+                except Exception:
+                    pass
+            return
+
+        # Clear buttons from confirmation prompt before creating message
+        await interaction.edit_original_response(
+            content="⏳ Creating new live top games tracker...",
+            view=None
+        )
+    else:
+        await interaction.response.defer(ephemeral=True)
+
+    # 3. Create placeholder and initialize top games tracker
     embed = discord.Embed(
         title=f"📊 Live Top {clean_limit} Games",
         description="Initializing live updates...",
@@ -227,7 +299,6 @@ async def setup_top_games(interaction: discord.Interaction, limit: int = 10):
     message = await interaction.channel.send(embed=embed)
 
     try:
-        # Store message details in database
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 """
@@ -238,13 +309,11 @@ async def setup_top_games(interaction: discord.Interaction, limit: int = 10):
             )
             await db.commit()
 
-            # Update message with real subscription data immediately
         await refresh_live_top_games(interaction.client)
         await interaction.followup.send(f"✅ Live top games tracker (Top {clean_limit}) posted!", ephemeral=True)
 
     except Exception as e:
         print(f"[Setup Error] Failed to initialize live top games: {e}")
-        # Clean up orphan message if database write or refresh failed
         try:
             await message.delete()
         except Exception:
