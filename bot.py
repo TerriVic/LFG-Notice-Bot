@@ -872,7 +872,7 @@ class ConfirmDataDeletionView(discord.ui.View):
         # Stop listening to further events and remove the buttons from the message
         self.stop()
         await interaction.response.edit_message(
-            content="Action canceled. Subscription data was preserved.",
+            content="Action canceled. Your data gets to live another day.",
             view=None
         )
 
@@ -1038,16 +1038,23 @@ async def user_subscriptions(interaction: discord.Interaction, user: discord.Use
         ) as cursor:
             rows = await cursor.fetchall()
 
-    header = "Your subscribed games" if target_user.id == interaction.user.id else f"Subscribed games for **{target_user.display_name}**"
+    # Use the mention syntax directly in the header
+    header = "Your subscribed games" if target_user.id == interaction.user.id else f"Subscribed games for {target_user.mention}"
+
     if not rows:
-        await interaction.response.send_message("No active subscriptions found.", ephemeral=not public)
+        await interaction.response.send_message(
+            f"No active subscriptions found for {target_user.mention}.",
+            ephemeral=not public,
+            allowed_mentions=discord.AllowedMentions.none()  # Suppresses the ping
+        )
         return
 
     game_list = "\n".join(f"• {row[0]}" for row in rows)
 
     await interaction.response.send_message(
         f"**{header}** ({len(rows)}):\n{game_list}",
-        ephemeral=not public
+        ephemeral=not public,
+        allowed_mentions=discord.AllowedMentions.none()  # Suppresses the ping
     )
 
 @tree.command(name="show_subscribers", description="View all users in this server subscribed to a game without pinging them")
