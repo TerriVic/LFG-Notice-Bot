@@ -418,7 +418,8 @@ class UserCommands(commands.Cog):
 
         embed = discord.Embed(
             title="Bot Command Guide",
-            description="Here is everything you can do with the bot:",
+            description="Here is everything you can do with the bot:\n"
+                        "-# Options marked `[public]` are visible only to you by default. Set `public: True` to share them in channel.",
             color=discord.Color.blue()
         )
 
@@ -456,7 +457,7 @@ class UserCommands(commands.Cog):
         is_admin = interaction.permissions and interaction.permissions.administrator
         if is_admin:
             # Visual separator line (only appears for admins/owners)
-            embed.add_field(name="\u200b", value="─────────────────────────────", inline=False)
+            embed.add_field(name="\u200b", value="─────────────────────────────\n", inline=False)
             embed.add_field(
                 name="Server Administration",
                 value=(
