@@ -55,7 +55,26 @@ async def init_db():
                              );
                          """)
 
+        async with db.execute("PRAGMA table_info(live_top_games);") as cursor:
+            columns = [col[1] for col in await cursor.fetchall()]
+
+        if columns and "entry_limit" not in columns:
+            print("[DB Setup] Upgrading live_top_games table schema...")
+            await db.execute("DROP TABLE live_top_games;")
+
+        await db.execute("""
+                         CREATE TABLE IF NOT EXISTS live_top_games (
+                                                                       message_id INTEGER PRIMARY KEY,
+                                                                       guild_id INTEGER NOT NULL,
+                                                                       channel_id INTEGER NOT NULL,
+                                                                       entry_limit INTEGER DEFAULT 10,
+                                                                       created_at INTEGER DEFAULT (strftime('%s', 'now'))
+                         );
+                         """)
+
         await db.commit()
+
+
     print("[DB Setup] Schema checked and migrated safely.")
 
 async def auto_migrate_multiplayer_flags():

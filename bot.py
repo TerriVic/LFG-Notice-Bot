@@ -10,7 +10,7 @@ from discord.ext import commands
 
 from database import init_db, auto_migrate_multiplayer_flags
 from cogs.admin_cmds import admin_group
-from cogs.background_tasks import update_igdb_catalog
+from cogs.background_tasks import update_igdb_catalog, update_live_top_games_loop
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
@@ -43,6 +43,10 @@ class GameBot(commands.Bot):
         if not update_igdb_catalog.is_running():
             update_igdb_catalog.start()
 
+        # Start the hourly live top games task
+        if not update_live_top_games_loop.is_running():
+            update_live_top_games_loop.start(self)
+
         synced = await self.tree.sync()
         print(f"Synced {len(synced)} global command(s)")
 
@@ -57,7 +61,7 @@ async def before_catalog_update():
 @client.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CheckFailure):
-        msg = "⛔ Only the bot owner can use administrative commands."
+        msg = "⛔ You do not have permission to run this administrative command."
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
         else:
@@ -66,9 +70,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
     if isinstance(error, app_commands.CommandOnCooldown):
         seconds = round(error.retry_after)
-        msg = f"⏳ Easy there! You can ping a game again in **{seconds} seconds**."
-
-        # Check if the interaction was already responded to or deferred
+        msg = f"⏳ Easy there! You can use this command again in **{seconds} seconds**."
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
         else:
