@@ -30,13 +30,13 @@ intents.members = True
 
 # Regex patterns
 EDITION_PATTERN = re.compile(
-    r'[\:\-\–\—\s]*\b(Game of the Year|GOTY|Ultimate|Deluxe|Collector\'s|Enhanced|Definitive|Gold|Complete|Special|Remastered|Edition|Director\'s Cut)\b.*$',
+    r'[:\-–—\s]*\b(Game of the Year|GOTY|Ultimate|Deluxe|Collector\'s|Enhanced|Definitive|Gold|Complete|Special|Remastered|Edition|Director\'s Cut)\b.*$',
     re.IGNORECASE
 )
 
 # GENERIC DLC REGEX: Catches any title with a colon/dash followed by common DLC/expansion keywords
 GENERIC_DLC_PATTERN = re.compile(
-    r'[\:\-\–\—]\s*.*?\b(DLC|Expansion|Pack|Add-on|Season Pass|Bonus Content|Soundtrack|Artbook|Episode|Chapter|Mission|Quest|Map Pack|Skin|Bundle)\b',
+    r'[:\-–—]\s*.*?\b(DLC|Expansion|Pack|Add-on|Season Pass|Bonus Content|Soundtrack|Artbook|Episode|Chapter|Mission|Quest|Map Pack|Skin|Bundle)\b',
     re.IGNORECASE
 )
 
@@ -49,7 +49,7 @@ def normalize_game_name(name: str) -> str:
     """Strips edition suffixes, standardizes mobile quotes, and removes trailing punctuation."""
     clean_name = name.replace("’", "'").replace("‘", "'")
     clean_name = EDITION_PATTERN.sub('', clean_name)
-    clean_name = re.sub(r'[\:\-\–\—\s]+$', '', clean_name)
+    clean_name = re.sub(r'[:\-–—\s]+$', '', clean_name)
     return clean_name.strip()
 
 def extract_id(val):
@@ -132,7 +132,7 @@ async def auto_migrate_multiplayer_flags():
         updated_mp = 0
 
         # Valid multiplayer IGDB game mode IDs: 2 (Multiplayer), 3 (Co-op), 4 (Split screen), 5 (MMO), 6 (Battle Royale)
-        MULTIPLAYER_MODE_IDS = {2, 3, 4, 5, 6}
+        multiplayer_mode_ids = {2, 3, 4, 5, 6}
 
         async with aiohttp.ClientSession() as session:
             for i in range(0, total_to_fix, chunk_size):
@@ -159,7 +159,7 @@ async def auto_migrate_multiplayer_flags():
                                         mode_ids.add(m)
 
                                 # Check if any multiplayer mode ID exists in the game's modes
-                                if mode_ids.intersection(MULTIPLAYER_MODE_IDS):
+                                if mode_ids.intersection(multiplayer_mode_ids):
                                     updated_mp += 1
                                     updates.append((1, gid))
 
@@ -351,7 +351,7 @@ async def update_igdb_catalog():
 async def before_catalog_update():
     await client.wait_until_ready()
 
-async def autocomplete_games(interaction: discord.Interaction, current: str):
+async def autocomplete_games(_interaction: discord.Interaction, current: str):
     try:
         clean_current = current.strip().replace("’", "'").replace("‘", "'").replace('"', '')
 
@@ -359,11 +359,12 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
         if not clean_current:
             async with aiosqlite.connect(DB_PATH) as db:
                 query_default = """
-                                SELECT name FROM igdb_games
+                                SELECT name
+                                FROM igdb_games
                                 WHERE is_multiplayer = 1
                                   AND (parent_game_id IS NULL OR parent_game_id = 0)
                                   AND (version_parent_id IS NULL OR version_parent_id = 0)
-                                ORDER BY total_rating_count DESC, id ASC
+                                ORDER BY total_rating_count DESC, id
                                 LIMIT 25
                                 """
                 async with db.execute(query_default) as cursor:
@@ -375,12 +376,12 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                              any(k in clean_current.lower() for k in ["dlc", "expansion", "pack", "add-on"])
 
         # Strip trailing punctuation/spaces (e.g., "abiotic factor:" -> "abiotic factor")
-        search_term = re.sub(r'[:\-\–\—\s]+$', '', clean_current)
+        search_term = re.sub(r'[:\-–—\s]+$', '', clean_current)
         if not search_term:
             search_term = clean_current
 
         # Sanitize for IGDB API to prevent 400 Bad Request on colons/dashes
-        igdb_search_query = re.sub(r'[:\-\–\—]', ' ', search_term).strip()
+        igdb_search_query = re.sub(r'[:\-–—]', ' ', search_term).strip()
         igdb_search_query = re.sub(r'\s+', ' ', igdb_search_query)
 
         choice_candidates = []
@@ -393,20 +394,20 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
             q_low = query.lower().strip()
 
             if t_low == q_low:
-                return (0, 1.0) # Exact Match
+                return 0, 1.0  # Exact Match
 
             clean_root = re.sub(r'\s*\b(1|2|3|4|5|i|ii|iii|iv|v)\b$', '', t_low).strip()
             if clean_root == q_low:
-                return (1, 0.95) # Sequel / Root Match
+                return 1, 0.95  # Sequel / Root Match
 
             if t_low.startswith(q_low):
                 ratio = difflib.SequenceMatcher(None, q_low, t_low).ratio()
-                return (2, ratio) # Prefix Match
+                return 2, ratio  # Prefix Match
 
             ratio = difflib.SequenceMatcher(None, q_low, t_low).ratio()
-            return (3, ratio) # Fuzzy Match
+            return 3, ratio  # Fuzzy Match
 
-        def get_sort_score(match_tier: int, is_mp: int) -> int:
+        def get_sort_score(inner_match_tier: int, inner_is_mp: int) -> int:
             """
             This guarantees:
             1. Multiplayer Exact/Sequels (Portal 2)
@@ -414,28 +415,28 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
             3. Multiplayer Prefix/Fuzzy (Portal Knights)
             ...ensuring single-player exact matches NEVER get buried by irrelevant multiplayer games.
             """
-            if match_tier == 0 and is_mp == 1: return 0  # MP Exact
-            if match_tier == 1 and is_mp == 1: return 1  # MP Sequel
-            if match_tier == 0 and is_mp == 0: return 2  # SP Exact
-            if match_tier == 1 and is_mp == 0: return 3  # SP Sequel
-            if match_tier == 2 and is_mp == 1: return 4  # MP Prefix
-            if match_tier == 2 and is_mp == 0: return 5  # SP Prefix
-            if match_tier == 3 and is_mp == 1: return 6  # MP Fuzzy
+            if inner_match_tier == 0 and inner_is_mp == 1: return 0  # MP Exact
+            if inner_match_tier == 1 and inner_is_mp == 1: return 1  # MP Sequel
+            if inner_match_tier == 0 and inner_is_mp == 0: return 2  # SP Exact
+            if inner_match_tier == 1 and inner_is_mp == 0: return 3  # SP Sequel
+            if inner_match_tier == 2 and inner_is_mp == 1: return 4  # MP Prefix
+            if inner_match_tier == 2 and inner_is_mp == 0: return 5  # SP Prefix
+            if inner_match_tier == 3 and inner_is_mp == 1: return 6  # MP Fuzzy
             return 7                                     # SP Fuzzy
 
-        def should_keep_candidate(name: str, rating_cnt: int, match_tier: int, similarity: float) -> bool:
-            name_low = name.lower()
+        def should_keep_candidate(inner_name: str, inner_rating_cnt: int, inner_match_tier: int, inner_similarity: float) -> bool:
+            name_low = inner_name.lower()
 
             # Filter unwanted keywords unless user searched for them explicitly
             if not user_wants_noise and any(k in name_low for k in NOISE_KEYWORDS):
                 return False
 
             # Drop weak fuzzy matches
-            if match_tier == 3 and similarity < 0.60:
+            if inner_match_tier == 3 and inner_similarity < 0.60:
                 return False
 
             # Drop unrated shovelware/fan projects unless it's a direct prefix/exact match
-            if (not rating_cnt or rating_cnt == 0) and match_tier == 3:
+            if (not inner_rating_cnt or inner_rating_cnt == 0) and inner_match_tier == 3:
                 return False
 
             return True
@@ -488,7 +489,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                         choice_candidates.append((sort_score, -similarity, -(rating_cnt or 0), name, is_mp))
                         seen_names.add(name.lower())
 
-# 3. LIVE IGDB SEARCH
+        # 3. LIVE IGDB SEARCH
         if len(search_term) >= 2:
             client_id = os.getenv("TWITCH_CLIENT_ID")
             access_token = os.getenv("TWITCH_ACCESS_TOKEN")
@@ -575,8 +576,9 @@ async def autocomplete_admin_unsubscribe(interaction: discord.Interaction, curre
                 SELECT g.name
                 FROM subscriptions s
                          JOIN igdb_games g ON s.game_id = g.id
-                WHERE s.user_id = ? AND g.name LIKE ?
-                ORDER BY g.name ASC
+                WHERE s.user_id = ?
+                  AND g.name LIKE ?
+                ORDER BY g.name
                 LIMIT 25
                 """,
                 (target_user.id, f"%{clean_current}%")
@@ -703,14 +705,15 @@ async def autocomplete_user_subscriptions(interaction: discord.Interaction, curr
     clean_current = current.strip().replace("’", "'").replace("‘", "'")
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-        """
-        SELECT g.name
-        FROM subscriptions s
-                 JOIN igdb_games g ON s.game_id = g.id
-        WHERE s.user_id = ? AND g.name LIKE ?
-        ORDER BY g.name ASC
-        LIMIT 25
-        """,
+                """
+                SELECT g.name
+                FROM subscriptions s
+                         JOIN igdb_games g ON s.game_id = g.id
+                WHERE s.user_id = ?
+                  AND g.name LIKE ?
+                ORDER BY g.name
+                LIMIT 25
+                """,
         (interaction.user.id, f"%{clean_current}%")
         ) as cursor:
             rows = await cursor.fetchall()
@@ -840,12 +843,12 @@ class ConfirmDataDeletionView(discord.ui.View):
         return True
 
     @discord.ui.button(label="Confirm Deletion", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("DELETE FROM subscriptions WHERE user_id = ?", (interaction.user.id,))
             await db.commit()
 
-        # 2. Disable buttons and inform the user
+        # Disable all buttons in the view
         for child in self.children:
             child.disabled = True
 
@@ -855,7 +858,7 @@ class ConfirmDataDeletionView(discord.ui.View):
         )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
         for child in self.children:
             child.disabled = True
 
@@ -1021,7 +1024,7 @@ async def user_subscriptions(interaction: discord.Interaction, user: discord.Use
 
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT g.name FROM subscriptions s JOIN igdb_games g ON s.game_id = g.id WHERE s.user_id = ? ORDER BY g.name ASC",
+                "SELECT g.name FROM subscriptions s JOIN igdb_games g ON s.game_id = g.id WHERE s.user_id = ? ORDER BY g.name ",
         (target_user.id,)
         ) as cursor:
             rows = await cursor.fetchall()
