@@ -391,6 +391,73 @@ async def edit_top_games(interaction: discord.Interaction, message: str, limit: 
     await refresh_live_top_games(interaction.client)
     await interaction.followup.send(f"✅ Tracker message updated to show **Top {clean_limit}** games!", ephemeral=True)
 
+@admin_group.command(name="overview", description="View all user subscriptions across all servers")
+@is_bot_owner()
+async def admin_overview(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+                """
+                SELECT s.user_id, g.name
+                FROM subscriptions s
+                         JOIN igdb_games g ON s.game_id = g.id
+                ORDER BY s.user_id, g.name
+                """
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+    if not rows:
+        await interaction.followup.send("📊 **Global Overview:** No active subscriptions found in the database.", ephemeral=True)
+        return
+
+    # Aggregate subscriptions per user ID
+    user_map: dict[int, list[str]] = {}
+    for user_id, game_name in rows:
+        user_map.setdefault(user_id, []).append(game_name)
+
+    total_subscriptions = len(rows)
+    total_users = len(user_map)
+
+    # Build description lines
+    lines = [
+        f"**Total Subscribers:** {total_users} | **Total Subscriptions:** {total_subscriptions}\n"
+    ]
+
+    for user_id, games in user_map.items():
+        # Try fetching member/user display name from Discord cache, fallback to mention
+        user_obj = interaction.client.get_user(user_id)
+        user_label = f"**{user_obj.display_name}** (<@{user_id}>)" if user_obj else f"<@{user_id}>"
+
+        games_str = ", ".join(f"`{g}`" for g in games)
+        lines.append(f"• {user_label} ({len(games)}): {games_str}")
+
+    # Chunk lines into multiple embeds if message exceeds Discord's character limits
+    embeds = []
+    current_embed = discord.Embed(
+        title="🌐 Global Subscriptions Overview",
+        color=discord.Color.blue()
+    )
+    current_text = ""
+
+    for line in lines:
+        if len(current_text) + len(line) + 1 > 3800:
+            current_embed.description = current_text
+            embeds.append(current_embed)
+            current_embed = discord.Embed(color=discord.Color.blue())
+            current_text = line + "\n"
+        else:
+            current_text += line + "\n"
+
+    if current_text:
+        current_embed.description = current_text
+        embeds.append(current_embed)
+
+    # Send the first embed via followup, and any extra chunks as additional followups
+    await interaction.followup.send(embed=embeds[0], ephemeral=True)
+    for extra_embed in embeds[1:]:
+        await interaction.followup.send(embed=extra_embed, ephemeral=True)
+
 # Bind the subscriber-specific autocomplete function
 admin_subscribe.autocomplete('game')(autocomplete_games)
 admin_unsubscribe.autocomplete('game')(autocomplete_admin_unsubscribe)
