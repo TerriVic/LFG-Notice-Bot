@@ -3,6 +3,7 @@ import aiosqlite
 import discord
 from discord import app_commands
 
+from cogs.background_tasks import refresh_live_top_games
 from database import DB_PATH
 from utils import (
     resolve_to_base_game,
@@ -152,6 +153,72 @@ async def admin_delete_user_data(interaction: discord.Interaction, user: discord
         view=view,
         ephemeral=True
     )
+
+@admin_group.command(name="setup_top_games", description="Post a live-updating top games message in this channel")
+@is_bot_owner()
+async def setup_top_games(interaction: discord.Interaction):
+    if not interaction.guild:
+        await interaction.response.send_message("This command must be run inside a server.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    # Post the initial message that will be continuously updated
+    embed = discord.Embed(title="📊 Live Top Games", description="Initializing live updates...", color=discord.Color.gold())
+    message = await interaction.channel.send(embed=embed)
+
+    # Save or update the tracked message target in DB
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO live_top_games (guild_id, channel_id, message_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                                                channel_id = excluded.channel_id,
+                                                message_id = excluded.message_id
+            """,
+            (interaction.guild.id, interaction.channel.id, message.id)
+        )
+        await db.commit()
+
+    # Trigger immediate embed update instead of waiting 1 hour
+    await refresh_live_top_games(interaction.client)
+
+    await interaction.followup.send("✅ Live top games tracker posted and updated!", ephemeral=True)
+
+@admin_group.command(name="remove_top_games", description="Delete the bot's live top games message and stop updating it")
+@is_bot_owner()
+async def remove_top_games(interaction: discord.Interaction):
+    if not interaction.guild:
+        await interaction.response.send_message("This command must be run inside a server.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT channel_id, message_id FROM live_top_games WHERE guild_id = ?", (interaction.guild.id,)) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            await interaction.followup.send("No active live top games tracker found for this server.", ephemeral=True)
+            return
+
+        channel_id, message_id = row
+
+        # Attempt to delete the message from the channel
+        channel = interaction.guild.get_channel(channel_id)
+        if channel:
+            try:
+                msg = await channel.fetch_message(message_id)
+                await msg.delete()
+            except (discord.NotFound, discord.Forbidden):
+                pass  # Message was already deleted manually or permissions missing
+
+        # Remove entry from DB
+        await db.execute("DELETE FROM live_top_games WHERE guild_id = ?", (interaction.guild.id,))
+        await db.commit()
+
+    await interaction.followup.send("🗑️ Live top games tracker removed successfully.", ephemeral=True)
 
 # Bind the subscriber-specific autocomplete function
 admin_subscribe.autocomplete('game')(autocomplete_games)

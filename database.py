@@ -27,6 +27,14 @@ async def init_db():
                          );
                          """)
 
+        await db.execute("""
+                        CREATE TABLE IF NOT EXISTS live_top_games (
+                                                                   guild_id INTEGER PRIMARY KEY,
+                                                                   channel_id INTEGER NOT NULL,
+                                                                   message_id INTEGER NOT NULL
+                 );
+                 """)
+
         # Dynamic Migration: Fetch existing column names
         async with db.execute("PRAGMA table_info(igdb_games);") as cursor:
             columns = [column[1] for column in await cursor.fetchall()]

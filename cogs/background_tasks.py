@@ -4,6 +4,7 @@ import time
 
 import aiohttp
 import aiosqlite
+import discord
 from discord.ext import tasks
 
 from database import DB_PATH
@@ -132,3 +133,61 @@ async def update_igdb_catalog():
                 await asyncio.sleep(0.3)
 
         print(f"[IGDB Sync] Finished catalog sync. Added/Updated {total_upserted} games across {page_count} batches.")
+
+async def refresh_live_top_games(bot: discord.Client):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT guild_id, channel_id, message_id FROM live_top_games") as cursor:
+            tracked = await cursor.fetchall()
+
+        if not tracked:
+            return
+
+        # Fetch active subscriptions
+        async with db.execute("SELECT s.user_id, g.name FROM subscriptions s JOIN igdb_games g ON s.game_id = g.id") as cursor:
+            sub_rows = await cursor.fetchall()
+
+        for guild_id, channel_id, message_id in tracked:
+            guild = bot.get_guild(guild_id)
+            if not guild:
+                continue
+
+            channel = guild.get_channel(channel_id)
+            if not channel:
+                continue
+
+            try:
+                message = await channel.fetch_message(message_id)
+            except (discord.NotFound, discord.Forbidden):
+                # Clean up stale DB entry if message or permissions were lost
+                await db.execute("DELETE FROM live_top_games WHERE guild_id = ?", (guild_id,))
+                await db.commit()
+                continue
+
+            # Calculate game subscriber counts for members in this guild
+            game_counts = {}
+            for user_id, game_name in sub_rows:
+                if guild.get_member(user_id):
+                    game_counts[game_name] = game_counts.get(game_name, 0) + 1
+
+            if not game_counts:
+                description = "No active game subscriptions in this server."
+            else:
+                sorted_games = sorted(game_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+                formatted_list = [
+                    f"`#{idx + 1}` **{gname}** — {cnt} {'subscriber' if cnt == 1 else 'subscribers'}"
+                    for idx, (gname, cnt) in enumerate(sorted_games)
+                ]
+                description = "\n".join(formatted_list)
+
+            embed = discord.Embed(
+                title=f"📊 Live Top Games in {guild.name}",
+                description=description,
+                color=discord.Color.gold()
+            )
+            embed.set_footer(text="Updates automatically every hour")
+
+            await message.edit(content=None, embed=embed)
+
+@tasks.loop(hours=1)
+async def update_live_top_games_loop(bot: discord.Client):
+    await refresh_live_top_games(bot)

@@ -10,7 +10,7 @@ from discord.ext import commands
 
 from database import init_db, auto_migrate_multiplayer_flags
 from cogs.admin_cmds import admin_group
-from cogs.background_tasks import update_igdb_catalog
+from cogs.background_tasks import update_igdb_catalog, update_live_top_games_loop
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
@@ -42,6 +42,10 @@ class GameBot(commands.Bot):
 
         if not update_igdb_catalog.is_running():
             update_igdb_catalog.start()
+
+        # Start the hourly live top games task
+        if not update_live_top_games_loop.is_running():
+            update_live_top_games_loop.start(self)
 
         synced = await self.tree.sync()
         print(f"Synced {len(synced)} global command(s)")
