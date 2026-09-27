@@ -134,9 +134,20 @@ class ConfirmDuplicateSetupView(discord.ui.View):
         self.value = None
         self.stop()
 
-admin_group = app_commands.Group(name="admin", description="Admin-only bot management commands")
+# Group 1: Server Management (Server Admins + Bot Owner)
+admin_group = app_commands.Group(
+    name="admin",
+    description="Server administration commands",
+    default_permissions=discord.Permissions(administrator=True)
+)
 
-@admin_group.command(name="subscribe_user", description="Force-subscribe a user to a game")
+# Group 2: Bot Infrastructure & Global Maintenance (Bot Owner Only)
+owner_group = app_commands.Group(
+    name="owner",
+    description="Bot owner maintenance commands"
+)
+
+@owner_group.command(name="subscribe_user", description="Force-subscribe a user to a game")
 @is_bot_owner()
 async def admin_subscribe(interaction: discord.Interaction, user: discord.User, game: str):
     await interaction.response.defer(ephemeral=True)
@@ -181,7 +192,7 @@ async def admin_subscribe(interaction: discord.Interaction, user: discord.User, 
         ephemeral=True
     )
 
-@admin_group.command(name="unsubscribe_user", description="Force-unsubscribe a user from a game")
+@owner_group.command(name="unsubscribe_user", description="Force-unsubscribe a user from a game")
 @is_bot_owner()
 async def admin_unsubscribe(interaction: discord.Interaction, user: discord.User, game: str):
     if game == "__NONE__":
@@ -226,7 +237,7 @@ async def admin_unsubscribe(interaction: discord.Interaction, user: discord.User
         ephemeral=True
     )
 
-@admin_group.command(name="delete_user_data", description="Permanently delete all subscription data for a specific user")
+@owner_group.command(name="delete_user_data", description="Permanently delete all subscription data for a specific user")
 @is_bot_owner()
 async def admin_delete_user_data(interaction: discord.Interaction, user: discord.User):
     view = ConfirmDataDeletionView(target_user_id=user.id, author_id=interaction.user.id)
@@ -235,6 +246,73 @@ async def admin_delete_user_data(interaction: discord.Interaction, user: discord
         view=view,
         ephemeral=True
     )
+
+@owner_group.command(name="overview", description="View all user subscriptions across all servers")
+@is_bot_owner()
+async def admin_overview(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+                """
+                SELECT s.user_id, g.name
+                FROM subscriptions s
+                         JOIN igdb_games g ON s.game_id = g.id
+                ORDER BY s.user_id, g.name
+                """
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+    if not rows:
+        await interaction.followup.send("📊 **Global Overview:** No active subscriptions found in the database.", ephemeral=True)
+        return
+
+    # Aggregate subscriptions per user ID
+    user_map: dict[int, list[str]] = {}
+    for user_id, game_name in rows:
+        user_map.setdefault(user_id, []).append(game_name)
+
+    total_subscriptions = len(rows)
+    total_users = len(user_map)
+
+    # Build description lines
+    lines = [
+        f"**Total Subscribers:** {total_users} | **Total Subscriptions:** {total_subscriptions}\n"
+    ]
+
+    for user_id, games in user_map.items():
+        # Try fetching member/user display name from Discord cache, fallback to mention
+        user_obj = interaction.client.get_user(user_id)
+        user_label = f"**{user_obj.display_name}** (<@{user_id}>)" if user_obj else f"<@{user_id}>"
+
+        games_str = ", ".join(f"`{g}`" for g in games)
+        lines.append(f"• {user_label} ({len(games)}): {games_str}")
+
+    # Chunk lines into multiple embeds if message exceeds Discord's character limits
+    embeds = []
+    current_embed = discord.Embed(
+        title="🌐 Global Subscriptions Overview",
+        color=discord.Color.blue()
+    )
+    current_text = ""
+
+    for line in lines:
+        if len(current_text) + len(line) + 1 > 3800:
+            current_embed.description = current_text
+            embeds.append(current_embed)
+            current_embed = discord.Embed(color=discord.Color.blue())
+            current_text = line + "\n"
+        else:
+            current_text += line + "\n"
+
+    if current_text:
+        current_embed.description = current_text
+        embeds.append(current_embed)
+
+    # Send the first embed via followup, and any extra chunks as additional followups
+    await interaction.followup.send(embed=embeds[0], ephemeral=True)
+    for extra_embed in embeds[1:]:
+        await interaction.followup.send(embed=extra_embed, ephemeral=True)
 
 @admin_group.command(name="setup_top_games", description="Post a live-updating top games message in this channel")
 @app_commands.describe(limit="Number of top games to display in this list (default: 10, max: 25)")
@@ -320,7 +398,6 @@ async def setup_top_games(interaction: discord.Interaction, limit: int = 10):
             pass
         await interaction.followup.send(f"❌ Failed to set up live tracker: `{e}`", ephemeral=True)
 
-
 @admin_group.command(name="remove_top_games", description="Delete a live top games tracker message")
 @app_commands.describe(message="Select the live tracker message to remove")
 @app_commands.autocomplete(message=autocomplete_live_messages)
@@ -360,7 +437,6 @@ async def remove_top_games(interaction: discord.Interaction, message: str):
 
     await interaction.followup.send("🗑️ Live top games tracker removed successfully.", ephemeral=True)
 
-
 @admin_group.command(name="edit_top_games", description="Edit the entry limit of an existing live top games tracker")
 @app_commands.describe(message="Select the tracker message to edit", limit="New number of top games to display (1-25)")
 @app_commands.autocomplete(message=autocomplete_live_messages)
@@ -391,72 +467,6 @@ async def edit_top_games(interaction: discord.Interaction, message: str, limit: 
     await refresh_live_top_games(interaction.client)
     await interaction.followup.send(f"✅ Tracker message updated to show **Top {clean_limit}** games!", ephemeral=True)
 
-@admin_group.command(name="overview", description="View all user subscriptions across all servers")
-@is_bot_owner()
-async def admin_overview(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-                """
-                SELECT s.user_id, g.name
-                FROM subscriptions s
-                         JOIN igdb_games g ON s.game_id = g.id
-                ORDER BY s.user_id, g.name
-                """
-        ) as cursor:
-            rows = await cursor.fetchall()
-
-    if not rows:
-        await interaction.followup.send("📊 **Global Overview:** No active subscriptions found in the database.", ephemeral=True)
-        return
-
-    # Aggregate subscriptions per user ID
-    user_map: dict[int, list[str]] = {}
-    for user_id, game_name in rows:
-        user_map.setdefault(user_id, []).append(game_name)
-
-    total_subscriptions = len(rows)
-    total_users = len(user_map)
-
-    # Build description lines
-    lines = [
-        f"**Total Subscribers:** {total_users} | **Total Subscriptions:** {total_subscriptions}\n"
-    ]
-
-    for user_id, games in user_map.items():
-        # Try fetching member/user display name from Discord cache, fallback to mention
-        user_obj = interaction.client.get_user(user_id)
-        user_label = f"**{user_obj.display_name}** (<@{user_id}>)" if user_obj else f"<@{user_id}>"
-
-        games_str = ", ".join(f"`{g}`" for g in games)
-        lines.append(f"• {user_label} ({len(games)}): {games_str}")
-
-    # Chunk lines into multiple embeds if message exceeds Discord's character limits
-    embeds = []
-    current_embed = discord.Embed(
-        title="🌐 Global Subscriptions Overview",
-        color=discord.Color.blue()
-    )
-    current_text = ""
-
-    for line in lines:
-        if len(current_text) + len(line) + 1 > 3800:
-            current_embed.description = current_text
-            embeds.append(current_embed)
-            current_embed = discord.Embed(color=discord.Color.blue())
-            current_text = line + "\n"
-        else:
-            current_text += line + "\n"
-
-    if current_text:
-        current_embed.description = current_text
-        embeds.append(current_embed)
-
-    # Send the first embed via followup, and any extra chunks as additional followups
-    await interaction.followup.send(embed=embeds[0], ephemeral=True)
-    for extra_embed in embeds[1:]:
-        await interaction.followup.send(embed=extra_embed, ephemeral=True)
 
 # Bind the subscriber-specific autocomplete function
 admin_subscribe.autocomplete('game')(autocomplete_games)
