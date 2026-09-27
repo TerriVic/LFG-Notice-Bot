@@ -76,8 +76,14 @@ async def init_db():
                          );
                          """)
 
-        await db.commit()
+        await db.execute("""
+                         CREATE TABLE IF NOT EXISTS user_settings (
+                                                                      user_id INTEGER PRIMARY KEY,
+                                                                      ping_template TEXT
+                         );
+                         """)
 
+        await db.commit()
 
     print("[DB Setup] Schema checked and migrated safely.")
 
