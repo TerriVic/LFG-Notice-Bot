@@ -241,7 +241,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-IGDB_*
+
 # Database & persistent volume data
 *.sqlite
 *.db
@@ -257,3 +257,5 @@ __pycache__/
 
 # Temporary text logs / tokens
 Twitch.txt
+test_server_code_snippet.py
+IGDB_*
