@@ -301,10 +301,12 @@ class UserCommands(commands.Cog):
 
     @app_commands.command(name="help", description="Show information about available bot commands")
     async def help_command(self, interaction: discord.Interaction):
-        # Lookup helper: returns </name:id> if found, or standard `/name` backticks as fallback
-        def fmt(name: str) -> str:
-            # Safely fetch cached IDs stored on the bot instance
+        # Lookup helper: supports standalone commands or group subcommands
+        def fmt(name: str, sub: str = None) -> str:
             cid = getattr(self.bot, "command_ids", {}).get(name)
+            if sub:
+                full_cmd = f"{name} {sub}"
+                return f"</{full_cmd}:{cid}>" if cid else f"`/{full_cmd}`"
             return f"</{name}:{cid}>" if cid else f"`/{name}`"
 
         embed = discord.Embed(
@@ -315,16 +317,43 @@ class UserCommands(commands.Cog):
 
         embed.add_field(
             name="Managing Subscriptions",
-            value=f"• {fmt('subscribe')} `<game>` — Subscribe to LFG notifications.\n• {fmt('unsubscribe')} `<game>` — Unsubscribe.\n• {fmt('user_subscriptions')} — View active subscriptions.",
+            value=(
+                f"• {fmt('subscribe')} `<game>` — Subscribe to LFG notifications.\n"
+                f"• {fmt('unsubscribe')} `<game>` — Unsubscribe from active notifications.\n"
+                f"• {fmt('user_subscriptions')} — View active subscriptions."
+            ),
             inline=False
         )
 
         embed.add_field(
             name="Server Activity & Social",
-            value=f"• {fmt('ping_game')} `<game>` — Ping subscribers.\n• {fmt('top_games')} — Popular games.\n• {fmt('show_subscribers')} `<game>` — List subscribers.",
+            value=(
+                f"• {fmt('ping_game')} `<game>` — Ping subscribers.\n"
+                f"• {fmt('top_games')} — View popular server games.\n"
+                f"• {fmt('show_subscribers')} `<game>` — List subscribers."
+            ),
             inline=False
         )
-        embed.add_field(name="Data & Privacy", value=f"• {fmt('delete_my_data')} — Delete your data.", inline=False)
+
+        embed.add_field(
+            name="Data & Privacy",
+            value=f"• {fmt('delete_my_data')} — Delete your subscription data.",
+            inline=False
+        )
+
+        # Conditionally display admin section if user has Administrator permissions
+        is_admin = interaction.permissions and interaction.permissions.administrator
+        if is_admin:
+            embed.add_field(
+                name="Server Administration",
+                value=(
+                    f"• {fmt('admin', 'setup_top_games')} `[limit]` — Post a live-updating top games message.\n"
+                    f"• {fmt('admin', 'edit_top_games')} `<message>` `<limit>` — Edit the display limit of a live tracker.\n"
+                    f"• {fmt('admin', 'remove_top_games')} `<message>` — Remove an active live tracker."
+                ),
+                inline=False
+            )
+
         embed.set_footer(text="Looking for a missing game or DLC? Type its full name in /subscribe!")
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
