@@ -356,6 +356,7 @@ class ConfirmDataDeletionView(discord.ui.View):
             return False
         return True
 
+    # noinspection PyTypeChecker
     @discord.ui.button(label="Confirm Deletion", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
         async with aiosqlite.connect(DB_PATH) as db:
@@ -369,6 +370,7 @@ class ConfirmDataDeletionView(discord.ui.View):
             view=None
         )
 
+    # noinspection PyTypeChecker
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
         # Stop listening to further events and remove the buttons from the message

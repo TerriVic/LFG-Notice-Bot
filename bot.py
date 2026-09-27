@@ -19,9 +19,6 @@ intents.message_content = True
 intents.guilds = True
 intents.members = True
 
-# Cache for command IDs used by clickable help mentions
-COMMAND_IDS = {}
-
 # Custom Bot subclass to cleanly initialize tasks and command syncs
 class GameBot(commands.Bot):
     def __init__(self, *args, **kwargs):

@@ -114,12 +114,14 @@ class ConfirmDuplicateSetupView(discord.ui.View):
             return False
         return True
 
+    # noinspection PyTypeChecker
     @discord.ui.button(label="Create Tracker Anyway", style=discord.ButtonStyle.primary)
     async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
         self.value = True
         self.stop()
         await interaction.response.defer()
 
+    # noinspection PyTypeChecker
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
         self.value = False
@@ -350,6 +352,7 @@ async def setup_top_games(interaction: discord.Interaction, limit: int = 10, int
 
         if view.value:
             if view.value is None:
+                # noinspection PyBroadException
                 try:
                     await interaction.edit_original_response(content="⏳ Setup timed out.", view=None)
                 except Exception:
@@ -382,6 +385,7 @@ async def setup_top_games(interaction: discord.Interaction, limit: int = 10, int
         )
     except Exception as e:
         print(f"[Setup Error] {e}")
+        # noinspection PyBroadException
         try:
             await message.delete()
         except Exception:
