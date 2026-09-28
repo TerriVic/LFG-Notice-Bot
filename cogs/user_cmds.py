@@ -518,10 +518,10 @@ class UserCommands(commands.Cog):
             embed.add_field(
                 name="Server Administration",
                 value=(
-                    f"• {fmt('admin', 'setup_top_games')} `[limit] [interval]` — Post a live-updating top games message.\n"
-                    f"• {fmt('admin', 'edit_top_games')} `<message> [limit] [interval]` — Edit tracker settings.\n"
-                    f"• {fmt('admin', 'force_update_top_games')} `<message>` — Force an immediate refresh.\n"
-                    f"• {fmt('admin', 'remove_top_games')} `<message>` — Stop tracking and delete an active live top games message."
+                    f"• {fmt('config', 'setup_top_games')} `[limit] [interval]` — Post a live-updating top games message (interval in hours, e.g., 0.25 for 15m).\n"
+                    f"• {fmt('config', 'edit_top_games')} `<message> [limit] [interval]` — Edit tracker settings or force a refresh if options are left empty.\n"
+                    f"• {fmt('config', 'force_update_top_games')} `<message>` — Force an immediate refresh on a live tracker.\n"
+                    f"• {fmt('config', 'remove_top_games')} `<message>` — Stop tracking and delete an active live top games message."
                 ),
                 inline=False
             )

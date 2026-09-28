@@ -24,14 +24,27 @@ def is_bot_owner():
         return interaction.user.id == get_bot_owner_id()
     return app_commands.check(predicate)
 
-def is_owner_or_admin():
+# Group 1: Server Management (Server Moderators + Bot Owner)
+mod_group = app_commands.Group(
+    name="config",
+    description="Server configuration commands",
+    # default_permissions=discord.Permissions(manage_messages=True)
+)
+
+# Group 2: Bot Infrastructure & Global Maintenance (Bot Owner Only)
+owner_group = app_commands.Group(
+    name="owner",
+    description="Bot owner maintenance commands"
+)
+
+def is_owner_or_moderator():
     async def predicate(interaction: discord.Interaction) -> bool:
         # 1. Allow Bot Owner anywhere
         if interaction.user.id == get_bot_owner_id():
             return True
 
-        # 2. Allow Server Administrator in their guild
-        if interaction.permissions and interaction.permissions.administrator:
+        # 2. Allow Moderators in their guild
+        if interaction.permissions and interaction.permissions.manage_messages:
             return True
 
         return False
@@ -134,19 +147,6 @@ class ConfirmDuplicateSetupView(discord.ui.View):
     async def on_timeout(self):
         self.value = None
         self.stop()
-
-# Group 1: Server Management (Server Admins + Bot Owner)
-admin_group = app_commands.Group(
-    name="admin",
-    description="Server administration commands",
-    default_permissions=discord.Permissions(administrator=True)
-)
-
-# Group 2: Bot Infrastructure & Global Maintenance (Bot Owner Only)
-owner_group = app_commands.Group(
-    name="owner",
-    description="Bot owner maintenance commands"
-)
 
 @owner_group.command(name="subscribe_user", description="Force-subscribe a user to a game")
 @is_bot_owner()
@@ -315,21 +315,27 @@ async def admin_overview(interaction: discord.Interaction):
     for extra_embed in embeds[1:]:
         await interaction.followup.send(embed=extra_embed, ephemeral=True)
 
-@admin_group.command(name="setup_top_games", description="Post a live-updating top games message in this channel")
+@mod_group.command(name="setup_top_games", description="Post a live-updating top games message in this channel")
 @app_commands.describe(
     limit="Number of top games to display (1-25, default: 10)",
-    interval="How often to refresh in hours (1-168, default: 1)"
+    interval="Update frequency in hours (e.g., 0.25 for 15m, 0.5 for 30m, default: 1)"
 )
-@is_owner_or_admin()
-async def setup_top_games(interaction: discord.Interaction, limit: int = 10, interval: int = 1):
+@is_owner_or_moderator()
+async def setup_top_games(
+        interaction: discord.Interaction,
+        limit: app_commands.Range[int, 1, 25] = 10,
+        interval: app_commands.Range[float, 0.25, 168.0] = 1.0
+):
     if not interaction.guild:
         await interaction.response.send_message("This command must be run inside a server.", ephemeral=True)
         return
 
-    clean_limit = max(1, min(limit, 25))
-    clean_interval = max(1, min(interval, 168))  # Limit interval between 1h and 1 week (168h)
+    await interaction.response.defer(ephemeral=True)
 
-    # 1. Check for existing tracker confirmation
+    clean_limit = max(1, min(limit, 25))
+    clean_interval = max(0.25, min(interval, 168.0))
+
+    # 2. Check for existing tracker confirmation
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT channel_id, created_at FROM live_top_games WHERE guild_id = ? ORDER BY created_at DESC LIMIT 1",
@@ -341,7 +347,9 @@ async def setup_top_games(interaction: discord.Interaction, limit: int = 10, int
         ch_id, created_at = existing
         time_formatted = f"<t:{created_at}:f> (<t:{created_at}:R>)" if created_at else "an unknown date"
         view = ConfirmDuplicateSetupView(author_id=interaction.user.id)
-        await interaction.response.send_message(
+
+        # Send prompt via followup since interaction was deferred upfront
+        prompt_msg = await interaction.followup.send(
             f"⚠️ A live top games tracker already exists in <#{ch_id}>, sent on {time_formatted}.\n"
             "Are you sure you want to create another one?",
             view=view,
@@ -350,22 +358,29 @@ async def setup_top_games(interaction: discord.Interaction, limit: int = 10, int
 
         await view.wait()
 
-        if view.value:
+        # If user clicked Cancel or timed out, stop execution
+        if not view.value:
             if view.value is None:
-                # noinspection PyBroadException
                 try:
-                    await interaction.edit_original_response(content="⏳ Setup timed out.", view=None)
+                    await prompt_msg.edit(content="⏳ Setup timed out.", view=None)
                 except Exception:
                     pass
             return
 
-        await interaction.edit_original_response(content="⏳ Creating new tracker...", view=None)
-    else:
-        await interaction.response.defer(ephemeral=True)
+        # User confirmed -> update prompt status and proceed
+        try:
+            await prompt_msg.edit(content="⏳ Creating new tracker...", view=None)
+        except Exception:
+            pass
 
-    # 2. Post placeholder message & insert into database
+    # 3. Post placeholder message & insert into database
     embed = discord.Embed(title=f"📊 Live Top {clean_limit} Games", description="Initializing...", color=discord.Color.gold())
-    message = await interaction.channel.send(embed=embed)
+
+    try:
+        message = await interaction.channel.send(embed=embed)
+    except discord.Forbidden:
+        await interaction.followup.send("❌ Bot lacks permission to send messages or embeds in this channel.", ephemeral=True)
+        return
 
     try:
         async with aiosqlite.connect(DB_PATH) as db:
@@ -392,10 +407,10 @@ async def setup_top_games(interaction: discord.Interaction, limit: int = 10, int
             pass
         await interaction.followup.send(f"❌ Failed to set up live tracker: `{e}`", ephemeral=True)
 
-@admin_group.command(name="remove_top_games", description="Delete a live top games tracker message")
+@mod_group.command(name="remove_top_games", description="Delete a live top games tracker message")
 @app_commands.describe(message="Select the live tracker message to remove")
 @app_commands.autocomplete(message=autocomplete_live_messages)
-@is_owner_or_admin()
+@is_owner_or_moderator()
 async def remove_top_games(interaction: discord.Interaction, message: str):
     if message == "__NONE__":
         await interaction.response.send_message("No live tracker message selected.", ephemeral=True)
@@ -431,10 +446,10 @@ async def remove_top_games(interaction: discord.Interaction, message: str):
 
     await interaction.followup.send("🗑️ Live top games tracker removed successfully.", ephemeral=True)
 
-@admin_group.command(name="force_update_top_games", description="Force an immediate refresh on a live top games tracker")
+@mod_group.command(name="force_update_top_games", description="Force an immediate refresh on a live top games tracker")
 @app_commands.describe(message="Select the tracker message to refresh")
 @app_commands.autocomplete(message=autocomplete_live_messages)
-@is_owner_or_admin()
+@is_owner_or_moderator()
 async def force_update_top_games(interaction: discord.Interaction, message: str):
     if message == "__NONE__":
         await interaction.response.send_message("No live tracker message selected.", ephemeral=True)
@@ -462,19 +477,19 @@ async def force_update_top_games(interaction: discord.Interaction, message: str)
 
 
 # --- Edit Command (with Force-Update Fallback) ---
-@admin_group.command(name="edit_top_games", description="Edit tracker settings or force a refresh if options are left empty")
+@mod_group.command(name="edit_top_games", description="Edit tracker settings or force a refresh if options are left empty")
 @app_commands.describe(
     message="Select the tracker message to edit",
     limit="New number of top games to display (1-25, optional)",
-    interval="New update frequency in hours (1-168, optional)"
+    interval="New update frequency in hours e.g. 0.5 (optional)"
 )
 @app_commands.autocomplete(message=autocomplete_live_messages)
-@is_owner_or_admin()
+@is_owner_or_moderator()
 async def edit_top_games(
-    interaction: discord.Interaction,
-    message: str,
-    limit: typing.Optional[int] = None,
-    interval: typing.Optional[int] = None
+        interaction: discord.Interaction,
+        message: str,
+        limit: typing.Optional[app_commands.Range[int, 1, 25]] = None,
+        interval: typing.Optional[app_commands.Range[float, 0.25, 168.0]] = None
 ):
     if message == "__NONE__":
         await interaction.response.send_message("No live tracker message selected.", ephemeral=True)
@@ -511,7 +526,7 @@ async def edit_top_games(
         current_limit, current_interval = row
 
         new_limit = max(1, min(limit, 25)) if limit is not None else current_limit
-        new_interval = max(1, min(interval, 168)) if interval is not None else current_interval
+        new_interval = max(0.25, min(interval, 168.0)) if interval is not None else current_interval
 
         await db.execute(
             "UPDATE live_top_games SET entry_limit = ?, update_interval = ? WHERE message_id = ?",

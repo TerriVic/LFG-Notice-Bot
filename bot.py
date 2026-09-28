@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from database import init_db, auto_migrate_multiplayer_flags
-from cogs.admin_cmds import admin_group, owner_group
+from cogs.admin_cmds import mod_group, owner_group
 from cogs.background_tasks import update_igdb_catalog, update_live_top_games_loop
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -32,7 +32,7 @@ class GameBot(commands.Bot):
         await self.load_extension("cogs.user_cmds")
 
         # Register administrative groups
-        self.tree.add_command(admin_group)
+        self.tree.add_command(mod_group)
         self.tree.add_command(owner_group)
 
         # Launch automatic DB classification and purge in background

@@ -35,13 +35,13 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 | `/delete_my_data`                     | Purge all your active game subscriptions and settings.                   |
 | `/help`                               | View an interactive command guide.                                       |
 
-### Server Administration Commands (`/admin`)
-| Command                                              | Description                                                                |
-|------------------------------------------------------|----------------------------------------------------------------------------|
-| `/admin setup_top_games [limit] [interval]`          | Post a live-updating top games leaderboard message in the current channel. |
-| `/admin edit_top_games <message> [limit] [interval]` | Update the display settings or refresh rate of an existing tracker.        |
-| `/admin force_update_top_games <message>`            | Force an immediate refresh on an active live tracker message.              |
-| `/admin remove_top_games <message>`                  | Stop tracking and delete an active live top games message.                 |
+### Bot Config Commands (`/config`)
+| Command                                               | Description                                                                                                                                                        |
+|-------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `/config setup_top_games [limit] [interval]`          | Post a live-updating top games leaderboard message in the current channel. `interval` accepts decimal hours (e.g., `0.25` for 15m, `0.5` for 30m, default: `1.0`). |
+| `/config edit_top_games <message> [limit] [interval]` | Update display limit or interval settings (e.g., `0.5` for 30m), or leave options empty to force an immediate refresh.                                             |
+| `/config force_update_top_games <message>`            | Force an immediate refresh on an active live tracker message.                                                                                                      |
+| `/config remove_top_games <message>`                  | Stop tracking and delete an active live top games message.                                                                                                         |
 
 ---
 
