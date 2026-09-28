@@ -388,6 +388,9 @@ def format_interval(hours: float) -> str:
         display_val = int(hours) if hours.is_integer() else hours
         return f"every {display_val} hours"
 
+def get_bot_owner_id() -> int:
+    raw_owner_id = os.getenv("BOT_OWNER_ID")
+    return int(raw_owner_id) if raw_owner_id and raw_owner_id.isdigit() else 0
 
 class ConfirmDataDeletionView(discord.ui.View):
     def __init__(self, target_user_id: int, author_id: int = None):
