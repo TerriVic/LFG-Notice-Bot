@@ -12,7 +12,7 @@ from utils import (
     resolve_to_base_game,
     autocomplete_games,
     fetch_and_cache_game_from_igdb,
-    ConfirmDataDeletionView
+    ConfirmDataDeletionView, format_interval
 )
 
 def get_bot_owner_id() -> int:
@@ -395,7 +395,7 @@ async def setup_top_games(
 
         await refresh_live_top_games(interaction.client, force=True)
         await interaction.followup.send(
-            f"✅ Live top games tracker posted! (Top {clean_limit}, updates every {clean_interval}h)",
+            f"✅ Live top games tracker posted! (Top {clean_limit}, {format_interval(clean_interval)})",
             ephemeral=True
         )
     except Exception as e:
@@ -541,7 +541,7 @@ async def edit_top_games(
     if limit is not None:
         changes.append(f"Limit ➔ **Top {new_limit}**")
     if interval is not None:
-        changes.append(f"Interval ➔ **Every {new_interval}h**")
+        changes.append(f"Interval ➔ **{format_interval(new_interval).capitalize()}**")
 
     await interaction.followup.send(
         f"✅ Tracker message updated successfully! ({', '.join(changes)})",

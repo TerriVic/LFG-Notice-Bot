@@ -377,6 +377,18 @@ async def autocomplete_games(_interaction: discord.Interaction, current: str):
     except (discord.NotFound, discord.HTTPException):
         return []
 
+def format_interval(hours: float) -> str:
+    """Helper to cleanly format update intervals into minutes or hours."""
+    if hours < 1:
+        mins = int(hours * 60)
+        return f"every {mins} minute" if mins == 1 else f"every {mins} minutes"
+    elif hours == 1:
+        return "every 1 hour"
+    else:
+        display_val = int(hours) if hours.is_integer() else hours
+        return f"every {display_val} hours"
+
+
 class ConfirmDataDeletionView(discord.ui.View):
     def __init__(self, target_user_id: int, author_id: int = None):
         super().__init__(timeout=30.0)

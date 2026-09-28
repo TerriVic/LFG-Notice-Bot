@@ -11,7 +11,7 @@ from discord.ext import tasks
 from database import DB_PATH
 from utils import (
     extract_id,
-    GENERIC_DLC_PATTERN
+    GENERIC_DLC_PATTERN, format_interval
 )
 
 @tasks.loop(hours=168)
@@ -159,9 +159,12 @@ async def refresh_live_top_games(
             sub_rows = await cursor.fetchall()
 
         for message_id, guild_id, channel_id, entry_limit, update_interval, last_updated in tracked:
-            # Skip if interval has not elapsed yet (unless forced or targeted)
             elapsed_seconds = now - (last_updated or 0)
-            if not force and target_message_id is None and elapsed_seconds < (update_interval * 3600):
+
+            # Allow a 10-second buffer so microsecond clock drift doesn't skip an entire cycle
+            required_seconds = (update_interval * 3600) - 10
+
+            if not force and target_message_id is None and elapsed_seconds < required_seconds:
                 continue
 
             guild = bot.get_guild(guild_id)
@@ -194,7 +197,7 @@ async def refresh_live_top_games(
                 ]
                 description = "\n".join(formatted_list)
 
-            interval_str = f"every {update_interval} hour" if update_interval == 1 else f"every {update_interval} hours"
+            interval_str = format_interval(update_interval)
             description += f"\n\n*Last updated <t:{now}:R> • Schedule: {interval_str}*"
 
             embed = discord.Embed(
@@ -209,6 +212,7 @@ async def refresh_live_top_games(
             await db.commit()
 
 
-@tasks.loop(hours=1)
+# Run the loop every 1 minute so all schedule intervals trigger right on time
+@tasks.loop(minutes=1)
 async def update_live_top_games_loop(bot: discord.Client):
     await refresh_live_top_games(bot, force=False)
