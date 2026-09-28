@@ -1,16 +1,15 @@
 import os
+import asyncio
 from dotenv import load_dotenv
 
 load_dotenv()
 
-import asyncio
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from database import init_db, auto_migrate_multiplayer_flags
-from cogs.admin_cmds import mod_group
-from cogs.background_tasks import update_igdb_catalog, update_live_top_games_loop
+from utils import get_bot_owner_id
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
@@ -28,31 +27,39 @@ class GameBot(commands.Bot):
     async def setup_hook(self):
         await init_db()
 
-        # Load cog extension
+        # Clean extension loading across all modules
         await self.load_extension("cogs.user_cmds")
         await self.load_extension("cogs.owner_cmds")
+        await self.load_extension("cogs.admin_cmds")
+        await self.load_extension("cogs.background_tasks")
 
-        # Register administrative groups
-        self.tree.add_command(mod_group)
-
-        # Launch automatic DB classification and purge in background
         asyncio.create_task(auto_migrate_multiplayer_flags())
-
-        if not update_igdb_catalog.is_running():
-            update_igdb_catalog.start()
-
-        # Start the hourly live top games task
-        if not update_live_top_games_loop.is_running():
-            update_live_top_games_loop.start(self)
-
-        synced = await self.tree.sync()
-        print(f"Synced {len(synced)} global command(s)")
 
 client = GameBot(command_prefix="!", intents=intents)
 
-@update_igdb_catalog.before_loop
-async def before_catalog_update():
-    await client.wait_until_ready()
+# Manual owner-only sync command (prevents startup rate-limits and command invalidation)
+@client.command(name="sync")
+async def sync_commands(ctx: commands.Context, guild_id: int = None):
+    if ctx.author.id != get_bot_owner_id():
+        return
+
+    if guild_id:
+        # Guild-specific sync (instant update for testing)
+        target_guild = discord.Object(id=guild_id)
+        client.tree.copy_global_to(guild=target_guild)
+        synced = await client.tree.sync(guild=target_guild)
+        await ctx.send(f"✅ Synced {len(synced)} command(s) to guild `{guild_id}`.")
+    else:
+        # Global sync across all servers
+        synced = await client.tree.sync()
+        await ctx.send(f"🌐 Synced {len(synced)} command(s) globally.")
+
+    # Update cached command IDs for help command mentions
+    try:
+        fetched_cmds = await client.tree.fetch_commands(guild=discord.Object(id=guild_id)) if guild_id else await client.tree.fetch_commands()
+        client.command_ids = {cmd.name: cmd.id for cmd in fetched_cmds}
+    except Exception as e:
+        print(f"[Help] Failed to update cached command IDs: {e}")
 
 @client.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -76,7 +83,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 async def on_ready():
     print(f"Logged in as {client.user}")
 
-    # Populate command IDs on client instance for clickable help mentions
+    # Fetch existing command IDs on startup without re-syncing tree
     try:
         fetched_cmds = await client.tree.fetch_commands()
         client.command_ids = {cmd.name: cmd.id for cmd in fetched_cmds}
