@@ -56,10 +56,11 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 | `/owner delete_user_data <user>`        | Permanently purge all stored subscription data for a specific user (triggers an interactive confirmation prompt). |
 
 #### Prefix Commands
-| Command                                             | Description                                                                                                                                 |
-|-----------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
-| `!sync [guild_id]`                                  | Manually sync slash command trees with Discord API. Omit `guild_id` for global sync or pass a guild ID for instant test server syncing.     |
-| `!delmsg <message_id> [channel_id]` / `!delete_msg` | Delete a specific message sent by the bot (in the current channel or in a specified target channel by ID). Restricted to the bot owner.     |
+| Command                                                  | Description                                                                                                                                        |
+|----------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
+| `!sync [guild_id]`                                       | Manually sync slash command trees with Discord API. Omit `guild_id` for global sync or pass a guild ID for instant test server syncing.            |
+| `!reload <cog_name>`                                     | Hot-reload a specific cog/extension without restarting the bot (e.g., !reload owner_cmds or !reload cogs.owner_cmds). Restricted to the bot owner. |
+| `!delmsg <message_id> [channel_id]` / `!delete_msg`      | Delete a specific message sent by the bot (in the current channel or in a specified target channel by ID). Restricted to the bot owner.            |
 ---
 ## Configuration & Environment Variables
 

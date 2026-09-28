@@ -59,6 +59,29 @@ class OwnerCommands(commands.Cog):
     )
 
     # --- PREFIX COMMANDS ---
+    @commands.command(name="reload")
+    @commands.is_owner()
+    async def reload_cog(self, ctx: commands.Context, cog_name: str):
+        # Strip .py extension if included by accident
+        if cog_name.endswith(".py"):
+            cog_name = cog_name[:-3]
+
+        # Standardize path to 'cogs.name'
+        target = cog_name if cog_name.startswith("cogs.") else f"cogs.{cog_name}"
+
+        try:
+            await ctx.bot.reload_extension(target)
+            await ctx.send(f"✅ Reloaded `{target}` successfully!")
+        except commands.ExtensionNotLoaded:
+            # Fallback to load_extension if the cog wasn't loaded at startup
+            try:
+                await ctx.bot.load_extension(target)
+                await ctx.send(f"✅ Loaded `{target}` successfully!")
+            except Exception as e:
+                await ctx.send(f"❌ Failed to load `{target}`:\n```py\n{e}\n```")
+        except Exception as e:
+            await ctx.send(f"❌ Failed to reload `{target}`:\n```py\n{e}\n```")
+
     @commands.command(name="delmsg", aliases=["delete_msg"])
     async def delete_bot_message(self, ctx: commands.Context, message_id: int, channel_id: int = None):
         # 1. Permission check matching custom bot owner ID
