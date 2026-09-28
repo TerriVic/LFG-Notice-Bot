@@ -216,6 +216,11 @@ async def autocomplete_games(_interaction: discord.Interaction, current: str):
                 ratio = difflib.SequenceMatcher(None, q_low, t_low).ratio()
                 return 2, ratio  # Prefix Match
 
+            # FIX: Treat substring/word containment as Tier 2 so it bypasses the 0.60 fuzzy cutoff
+            if q_low in t_low:
+                ratio = difflib.SequenceMatcher(None, q_low, t_low).ratio()
+                return 2, ratio  # Substring Match
+
             ratio = difflib.SequenceMatcher(None, q_low, t_low).ratio()
             return 3, ratio  # Fuzzy Match
 
