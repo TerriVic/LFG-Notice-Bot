@@ -1,3 +1,5 @@
+import datetime
+
 import aiosqlite
 import discord
 from discord import app_commands
@@ -8,7 +10,7 @@ from utils import (
     resolve_to_base_game,
     autocomplete_games,
     fetch_and_cache_game_from_igdb,
-    ConfirmDataDeletionView
+    ConfirmDataDeletionView, fetch_game_details_from_igdb
 )
 
 
@@ -395,7 +397,6 @@ class UserCommands(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none()
         )
 
-
     @app_commands.command(name="delete_my_data", description="Permanently delete all your subscription data from the bot")
     async def delete_my_data(self, interaction: discord.Interaction):
         view = ConfirmDataDeletionView(target_user_id=interaction.user.id)
@@ -405,6 +406,61 @@ class UserCommands(commands.Cog):
             ephemeral=True
         )
 
+    @app_commands.command(name="game_info", description="Get details, genres, and cover image for a game.")
+    @app_commands.describe(
+        game="The game to look up",
+        public="Set to True to share publicly (default: False)"
+    )
+    @app_commands.autocomplete(game=autocomplete_games)
+    async def game_info(self, interaction: discord.Interaction, game: str, public: bool = False):
+        # Defers the response as ephemeral unless public is True
+        await interaction.response.defer(ephemeral=not public)
+
+        game_data = await fetch_game_details_from_igdb(game)
+        if not game_data:
+            await interaction.followup.send(f"❌ Could not find game details for **{game}**.", ephemeral=not public)
+            return
+
+        # Safe field extractions
+        title = game_data.get("name", "Unknown Title")
+        summary = game_data.get("summary", "No description available.")
+        rating = f"{round(game_data['rating'])}%" if game_data.get("rating") else "N/A"
+        url = game_data.get("url", "")
+
+        # Use `or []` to guarantee an iterable if IGDB returns `None`
+        genres_data = game_data.get("genres") or []
+        genres = ", ".join([g.get("name", "Unknown") for g in genres_data]) or "N/A"
+
+        platforms_data = game_data.get("platforms") or []
+        platforms = ", ".join([p.get("name", "Unknown") for p in platforms_data]) or "N/A"
+
+        release_date = "Unknown"
+        if game_data.get("first_release_date"):
+            dt = datetime.datetime.fromtimestamp(game_data["first_release_date"], tz=datetime.timezone.utc)
+            release_date = dt.strftime("%B %d, %Y")
+
+        # Safely check that 'cover' is a dict before accessing 'image_id'
+        cover_url = None
+        if isinstance(game_data.get("cover"), dict) and "image_id" in game_data["cover"]:
+            cover_url = f"https://images.igdb.com/igdb/image/upload/t_cover_big/{game_data['cover']['image_id']}.jpg"
+
+        embed = discord.Embed(
+            title=title,
+            description=summary[:2048],
+            url=url,
+            color=discord.Color.blurple()
+        )
+
+        if cover_url:
+            embed.set_thumbnail(url=cover_url)
+
+        embed.add_field(name="🎮 Genres", value=genres, inline=True)
+        embed.add_field(name="⭐ Rating", value=rating, inline=True)
+        embed.add_field(name="📅 Release Date", value=release_date, inline=True)
+        embed.add_field(name="💻 Platforms", value=platforms, inline=False)
+        embed.set_footer(text="Data provided by IGDB")
+
+        await interaction.followup.send(embed=embed, ephemeral=not public)
 
     @app_commands.command(name="help", description="Show information about available bot commands")
     async def help_command(self, interaction: discord.Interaction):
@@ -424,8 +480,9 @@ class UserCommands(commands.Cog):
         )
 
         embed.add_field(
-            name="Managing Subscriptions",
+            name="Game Info & Subscriptions",
             value=(
+                f"• {fmt('game_info')} `<game>` `[public]` — Get details, genres, and cover image for a game.\n"
                 f"• {fmt('subscribe')} `<game>` — Subscribe to LFG notifications.\n"
                 f"• {fmt('unsubscribe')} `<game>` — Unsubscribe from active notifications.\n"
                 f"• {fmt('user_subscriptions')} — View active subscriptions."
@@ -440,7 +497,7 @@ class UserCommands(commands.Cog):
                 f"• {fmt('set_ping_template')} `<template>` — Set custom ping format.\n"
                 f"• {fmt('view_ping_template')} — View your saved ping format.\n"
                 f"• {fmt('reset_ping_template')} — Reset ping format to default.\n"
-                f"• {fmt('top_games')} `[limit] [public]` — View popular server games.\n"
+                f"• {fmt('top_games')} `[limit]` `[public]` — View popular server games.\n"
                 f"• {fmt('show_subscribers')} `<game>` — List subscribers."
             ),
             inline=False
@@ -464,7 +521,7 @@ class UserCommands(commands.Cog):
                     f"• {fmt('admin', 'setup_top_games')} `[limit] [interval]` — Post a live-updating top games message.\n"
                     f"• {fmt('admin', 'edit_top_games')} `<message> [limit] [interval]` — Edit tracker settings.\n"
                     f"• {fmt('admin', 'force_update_top_games')} `<message>` — Force an immediate refresh.\n"
-                    f"• {fmt('admin', 'remove_top_games')} `<message>` — Remove an active live tracker."
+                    f"• {fmt('admin', 'remove_top_games')} `<message>` — Stop tracking and delete an active live top games message."
                 ),
                 inline=False
             )
@@ -472,7 +529,6 @@ class UserCommands(commands.Cog):
         embed.set_footer(text="Looking for a missing game or DLC? Type its full name in /subscribe!")
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
 
 async def setup(bot):
     await bot.add_cog(UserCommands(bot))

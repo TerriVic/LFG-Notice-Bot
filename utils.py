@@ -38,6 +38,36 @@ def extract_id(val):
         return val.get("id")
     return val
 
+async def fetch_game_details_from_igdb(game_name: str) -> dict | None:
+    client_id = os.getenv("TWITCH_CLIENT_ID")
+    access_token = os.getenv("TWITCH_ACCESS_TOKEN")
+
+    if not client_id or not access_token:
+        return None
+
+    headers = {
+        "Client-ID": client_id,
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json"
+    }
+
+    # Escape double quotes to prevent API crashes on games like Marvel's Spider-Man
+    clean_search = normalize_game_name(game_name).replace('"', '\\"')
+
+    # Use exact match (=) rather than wildcard (~ *)
+    body = (
+        f'fields name, summary, rating, cover.image_id, genres.name, platforms.name, first_release_date, url; '
+        f'where name = "{clean_search}"; '
+        f'limit 1;'
+    )
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+            return data[0] if data else None
+
 async def fetch_and_cache_game_from_igdb(game_name: str, allow_dlc: bool = False) -> tuple[int, str] | None:
     client_id = os.getenv("TWITCH_CLIENT_ID")
     access_token = os.getenv("TWITCH_ACCESS_TOKEN")
