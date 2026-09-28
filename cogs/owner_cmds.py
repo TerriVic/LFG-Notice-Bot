@@ -142,6 +142,7 @@ class OwnerCommands(commands.Cog):
         )
 
     @owner_group.command(name="unsubscribe_user", description="Force-unsubscribe a user from a game")
+    @app_commands.autocomplete(game=autocomplete_admin_unsubscribe)
     @is_bot_owner()
     async def admin_unsubscribe(self, interaction: discord.Interaction, user: discord.User, game: str):
         if game == "__NONE__":
@@ -262,10 +263,6 @@ class OwnerCommands(commands.Cog):
         await interaction.followup.send(embed=embeds[0], ephemeral=True)
         for extra_embed in embeds[1:]:
             await interaction.followup.send(embed=extra_embed, ephemeral=True)
-
-        # # Bind the subscriber-specific autocomplete function
-        # admin_subscribe.autocomplete('game')(autocomplete_games)
-        # admin_unsubscribe.autocomplete('game')(autocomplete_admin_unsubscribe)
 
 async def setup(bot):
     await bot.add_cog(OwnerCommands(bot))
