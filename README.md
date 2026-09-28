@@ -45,14 +45,20 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 
 ---
 
-### Bot Owner Commands (`/owner` or `/admin`)
+### Bot Owner Commands
 
+#### Slash Commands (`/owner`)
 | Command                                 | Description                                                                                                       |
 |-----------------------------------------|-------------------------------------------------------------------------------------------------------------------|
 | `/owner overview`                       | View a global subscription overview across all servers.                                                           |
 | `/owner subscribe_user <user> <game>`   | Force-subscribe a target user to a specific game (supports autocomplete).                                         |
 | `/owner unsubscribe_user <user> <game>` | Force-unsubscribe a target user from a game (autocompletes only games that the user is subscribed to).            |
 | `/owner delete_user_data <user>`        | Permanently purge all stored subscription data for a specific user (triggers an interactive confirmation prompt). |
+
+#### Prefix Commands
+| Command                                                 | Description                                                                                                                                 |
+|---------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
+| `!delmsg <message_id> [channel_id]` / `!delete_msg`     | Delete a specific message sent by the bot (in the current channel or in a specified target channel by ID). Restricted to the bot owner.     |
 
 ---
 ## Configuration & Environment Variables
