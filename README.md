@@ -33,7 +33,7 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 | `/view_ping_template`                 | View your current custom ping template setting.                          |
 | `/reset_ping_template`                | Reset your custom ping template to default.                              |
 | `/delete_my_data`                     | Purge all your active game subscriptions and settings.                   |
-| `/help`                               | View an interactive command guide.                                       |
+| `/help [public]`                      | View an interactive command guide.                                       |
 
 ### Bot Config Commands (`/config`)
 | Command                                               | Description                                                                                                                                                        |
