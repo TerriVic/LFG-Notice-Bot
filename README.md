@@ -12,7 +12,7 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 * **IGDB Database Integration:** Autocomplete and search millions of games directly from IGDB, automatically resolving special/deluxe editions to base games.
 * **Live Top Games Leaderboard:** Post dynamic, self-updating embed trackers displaying the server's most popular games[cite: 10, 11].
 * **Custom Ping Templates:** Customize individual ping formatting and templates to suit your style.
-* **Privacy & Data Ownership:** Native `/delete_my_data` and `/unsubscribe` commands give users total control over their stored preferences.
+* **Privacy & Data Ownership:** Native `/delete_all_my_data`, `/delete_my_subscriptions`, and `/unsubscribe` commands give users total control over their stored preferences.
 * **Docker Ready:** Multi-stage Docker deployment setup with SQLite database persistence.
 
 ---
@@ -20,20 +20,21 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 ## 🛠Command Reference
 
 ### User Commands
-| Command                               | Description                                                              |
-|---------------------------------------|--------------------------------------------------------------------------|
-| `/subscribe <game>`                   | Subscribe to notifications for a game (with autocomplete & IGDB lookup). |
-| `/unsubscribe <game>`                 | Unsubscribe from active notifications for a game.                        |
-| `/user_subscriptions [user] [public]` | View active game subscriptions for yourself or another member.           |
-| `/game_info <game>`                   | Get details, genres, and cover image for a game.                         |
-| `/ping_game <game> [public]`          | Send an LFG ping mentioning all subscribers of a game.                   |
-| `/show_subscribers <game>`            | View subscribers for a game without triggering a ping.                   |
-| `/top_games [limit] [public]`         | View the most subscribed games on the server.                            |
-| `/set_ping_template`                  | Set a custom template for your `/ping_game` notifications.               |
-| `/view_ping_template`                 | View your current custom ping template setting.                          |
-| `/reset_ping_template`                | Reset your custom ping template to default.                              |
-| `/delete_my_data`                     | Purge all your active game subscriptions and settings.                   |
-| `/help [public]`                      | View an interactive command guide.                                       |
+| Command                               | Description                                                                |
+|---------------------------------------|----------------------------------------------------------------------------|
+| `/subscribe <game>`                   | Subscribe to notifications for a game (with autocomplete & IGDB lookup).   |
+| `/unsubscribe <game>`                 | Unsubscribe from active notifications for a game.                          |
+| `/user_subscriptions [user] [public]` | View active game subscriptions for yourself or another member.             |
+| `/game_info <game>`                   | Get details, genres, and cover image for a game.                           |
+| `/ping_game <game> [public]`          | Send an LFG ping mentioning all subscribers of a game.                     |
+| `/show_subscribers <game>`            | View subscribers for a game without triggering a ping.                     |
+| `/top_games [limit] [public]`         | View the most subscribed games on the server.                              |
+| `/set_ping_template`                  | Set a custom template for your `/ping_game` notifications.                 |
+| `/view_ping_template`                 | View your current custom ping template setting.                            |
+| `/reset_ping_template`                | Reset your custom ping template to default.                                |
+| `/delete_my_subscriptions`            | Purge all your active game subscriptions                                   |
+| `/delete_all_my_data`                 | Purge all your active game subscriptions and user settings/ping templates. |
+| `/help [public]`                      | View an interactive command guide.                                         |
 
 ### Bot Config Commands (`/config`)
 | Command                                               | Description                                                                                                                                                        |
@@ -44,18 +45,18 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 | `/config remove_top_games <message>`                  | Stop tracking and delete an active live top games message.                                                                                                         |
 | `/config server_overview`                             | View subscription details for members in the server where the command is called                                                                                    |
 
-
 ---
 
 ### Bot Owner Commands
 
 #### Slash Commands (`/owner`)
-| Command                                 | Description                                                                                                       |
-|-----------------------------------------|-------------------------------------------------------------------------------------------------------------------|
-| `/owner overview`                       | View a global subscription overview across all servers.                                                           |
-| `/owner subscribe_user <user> <game>`   | Force-subscribe a target user to a specific game (supports autocomplete).                                         |
-| `/owner unsubscribe_user <user> <game>` | Force-unsubscribe a target user from a game (autocompletes only games that the user is subscribed to).            |
-| `/owner delete_user_data <user>`        | Permanently purge all stored subscription data for a specific user (triggers an interactive confirmation prompt). |
+| Command                                   | Description                                                                                                       |
+|-------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
+| `/owner overview`                         | View a global subscription overview across all servers.                                                           |
+| `/owner subscribe_user <user> <game>`     | Force-subscribe a target user to a specific game (supports autocomplete).                                         |
+| `/owner unsubscribe_user <user> <game>`   | Force-unsubscribe a target user from a game (autocompletes only games that the user is subscribed to).            |
+| `/owner delete_user_subscriptions <user>` | Permanently purge all stored subscription data for a specific user (triggers an interactive confirmation prompt). |
+| `/owner delete_all_user_data <user>`      | Permanently purge all stored data for a specific user (triggers an interactive confirmation prompt).              |
 
 #### Prefix Commands
 | Command                                                  | Description                                                                                                                                        |
