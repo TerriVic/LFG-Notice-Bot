@@ -10,7 +10,8 @@ from utils import (
     resolve_to_base_game,
     autocomplete_games,
     fetch_and_cache_game_from_igdb,
-    ConfirmDataDeletionView, fetch_game_details_from_igdb, ConfirmResetTemplateView
+    fetch_game_details_from_igdb,
+    GenericConfirmationView
 )
 
 
@@ -314,18 +315,21 @@ class UserCommands(commands.Cog):
 
     @app_commands.command(name="reset_ping_template", description="Reset your ping template back to default")
     async def reset_ping_template(self, interaction: discord.Interaction):
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT ping_template FROM user_settings WHERE user_id = ?", (interaction.user.id,)) as cursor:
-                row = await cursor.fetchone()
+        # ... (check if setting exists) ...
 
-        if not row or not row[0]:
-            await interaction.response.send_message(
-                "You are already using the default ping template.",
-                ephemeral=True
-            )
-            return
+        async def do_reset(_inter: discord.Interaction):
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("DELETE FROM user_settings WHERE user_id = ?", (interaction.user.id,))
+                await db.commit()
 
-        view = ConfirmResetTemplateView(author_id=interaction.user.id)
+        view = GenericConfirmationView(
+            author_id=interaction.user.id,
+            confirm_label="Reset Template",
+            confirm_message="✅ Your ping template has been reset to the default format!",
+            cancel_message="Action canceled. Your custom ping template was preserved.",
+            on_confirm=do_reset
+        )
+
         await interaction.response.send_message(
             "Are you **sure** you want to reset your custom ping template back to default?",
             view=view,
@@ -419,11 +423,45 @@ class UserCommands(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none()
         )
 
-    @app_commands.command(name="delete_my_data", description="Permanently delete all your subscription data from the bot")
-    async def delete_my_data(self, interaction: discord.Interaction):
-        view = ConfirmDataDeletionView(target_user_id=interaction.user.id)
+    @app_commands.command(name="delete_my_subscriptions", description="Permanently delete all your subscription data")
+    async def delete_my_subscriptions(self, interaction: discord.Interaction):
+        async def do_delete_subs(_inter: discord.Interaction):
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("DELETE FROM subscriptions WHERE user_id = ?", (interaction.user.id,))
+                await db.commit()
+
+        view = GenericConfirmationView(
+            author_id=interaction.user.id,
+            confirm_label="Confirm Deletion",
+            confirm_message="**All your active game subscriptions have been deleted.**",
+            cancel_message="Action canceled. Subscription data was preserved.",
+            on_confirm=do_delete_subs
+        )
+
         await interaction.response.send_message(
-            "⚠️ **Are you sure you want to delete all your data?**\nThis will immediately remove all your active game subscriptions.",
+            "⚠️ **Are you sure you want to delete your subscriptions?**",
+            view=view,
+            ephemeral=True
+        )
+
+    @app_commands.command(name="delete_all_my_data", description="Permanently delete all your data and settings (e.g., ping templates).")
+    async def delete_all_my_data(self, interaction: discord.Interaction):
+        async def do_delete_all(_inter: discord.Interaction):
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("DELETE FROM subscriptions WHERE user_id = ?", (interaction.user.id,))
+                await db.execute("DELETE FROM user_settings WHERE user_id = ?", (interaction.user.id,))
+                await db.commit()
+
+        view = GenericConfirmationView(
+            author_id=interaction.user.id,
+            confirm_label="Delete All Data",
+            confirm_message="🗑️ **All your subscriptions and custom settings have been permanently deleted.**",
+            cancel_message="Action canceled. Your data remains untouched.",
+            on_confirm=do_delete_all
+        )
+
+        await interaction.response.send_message(
+            "⚠️ **Are you sure you want to delete ALL your data?**\nThis will remove subscriptions and custom ping settings.",
             view=view,
             ephemeral=True
         )
@@ -511,7 +549,8 @@ class UserCommands(commands.Cog):
                 f"• {fmt('game_info')} `<game>` `[public]` — Get details, genres, and cover image for a game.\n"
                 f"• {fmt('subscribe')} `<game>` — Subscribe to LFG notifications.\n"
                 f"• {fmt('unsubscribe')} `<game>` — Unsubscribe from active notifications.\n"
-                f"• {fmt('user_subscriptions')} `[user]` — View active subscriptions of specified user (defaults to self)."
+                f"• {fmt('user_subscriptions')} `[user]` — View active subscriptions of specified user (defaults to self).\n"
+                f"• {fmt('delete_my_subscriptions')} — Delete your active game subscriptions."
             ),
             inline=False
         )
@@ -537,10 +576,11 @@ class UserCommands(commands.Cog):
 
         embed.add_field(
             name="Data & Privacy",
-            value=f"• {fmt('delete_my_data')} — Delete your subscription data.",
+            value=(
+                f"• {fmt('delete_all_my_data')} — Delete all subscriptions and settings (e.g., ping templates)."
+            ),
             inline=False
         )
-
 
                 # Conditionally display admin section if user has Administrator permissions
         is_admin = interaction.permissions and interaction.permissions.administrator

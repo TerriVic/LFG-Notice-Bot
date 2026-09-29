@@ -2,6 +2,7 @@ import difflib
 import os
 import re
 import time
+from typing import Callable, Awaitable, Optional
 
 import aiohttp
 import aiosqlite
@@ -323,9 +324,9 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
             # Only shift score to top when boost_subscribed is True (/ping_game)
             return base_score - (10 if (boost_subscribed and inner_is_sub) else 0)
 
-        def should_keep_candidate(inner_name: str, inner_rating_cnt: int, inner_match_tier: int, inner_similarity: float, is_sub: bool = False) -> bool:
+        def should_keep_candidate(inner_name: str, inner_rating_cnt: int, inner_match_tier: int, inner_similarity: float, inner_is_sub: bool = False) -> bool:
             # Subscribed games ALWAYS bypass DLC, delimiter, and noise filters
-            if is_sub:
+            if inner_is_sub:
                 return True
 
             name_low = inner_name.lower()
@@ -423,7 +424,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                 for name, is_mp, rating_cnt, is_sub in rows_t1:
                     if name.lower() not in seen_names:
                         match_tier, similarity = compute_match_score(name, search_term)
-                        if should_keep_candidate(name, rating_cnt, match_tier, similarity, is_sub=bool(is_sub)):
+                        if should_keep_candidate(name, rating_cnt, match_tier, similarity, inner_is_sub=bool(is_sub)):
                             sort_score = get_sort_score(match_tier, is_mp, is_sub)
                             sub_cnt = server_sub_counts.get(name.lower(), 0)
                             # Tuple structure: (sort_score, -similarity, -sub_cnt, -rating_cnt, name, is_mp, is_sub)
@@ -539,50 +540,25 @@ def get_bot_owner_id() -> int:
     raw_owner_id = os.getenv("BOT_OWNER_ID")
     return int(raw_owner_id) if raw_owner_id and raw_owner_id.isdigit() else 0
 
-class ConfirmDataDeletionView(discord.ui.View):
-    def __init__(self, target_user_id: int, author_id: int = None):
-        super().__init__(timeout=30.0)
-        self.target_user_id = target_user_id
-        # Author is the person allowed to interact with buttons (defaults to target user)
-        self.author_id = author_id if author_id is not None else target_user_id
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # Ensures only the user who ran the command can press the buttons
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("You cannot use these buttons.", ephemeral=True)
-            return False
-        return True
-
-    # noinspection PyTypeChecker
-    @discord.ui.button(label="Confirm Deletion", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("DELETE FROM subscriptions WHERE user_id = ?", (self.target_user_id,))
-            await db.commit()
-
-        # Stop listening to further events and remove the buttons from the message
-        self.stop()
-        await interaction.response.edit_message(
-            content=f"**All subscription data for <@{self.target_user_id}> has been permanently deleted.**",
-            view=None
-        )
-
-    # noinspection PyTypeChecker
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
-        # Stop listening to further events and remove the buttons from the message
-        self.stop()
-        await interaction.response.edit_message(
-            content="Action canceled. Your data gets to live another day.",
-            view=None
-        )
-
-
 # noinspection PyTypeChecker
-class ConfirmResetTemplateView(discord.ui.View):
-    def __init__(self, author_id: int):
-        super().__init__(timeout=30.0)
+class GenericConfirmationView(discord.ui.View):
+    def __init__(
+            self,
+            author_id: int,
+            confirm_label: str = "Confirm",
+            confirm_message: str = "Action completed.",
+            cancel_message: str = "Action canceled.",
+            on_confirm: Optional[Callable[[discord.Interaction], Awaitable[None]]] = None,
+            timeout: float = 30.0
+    ):
+        super().__init__(timeout=timeout)
         self.author_id = author_id
+        self.confirm_message = confirm_message
+        self.cancel_message = cancel_message
+        self.on_confirm = on_confirm
+
+        # Dynamically set button label
+        self.confirm_button.label = confirm_label
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -590,22 +566,14 @@ class ConfirmResetTemplateView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Reset Template", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("DELETE FROM user_settings WHERE user_id = ?", (interaction.user.id,))
-            await db.commit()
-
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+    async def confirm_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        if self.on_confirm:
+            await self.on_confirm(interaction)
         self.stop()
-        await interaction.response.edit_message(
-            content="✅ Your ping template has been reset to the default format!",
-            view=None
-        )
+        await interaction.response.edit_message(content=self.confirm_message, view=None)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
+    async def cancel_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
         self.stop()
-        await interaction.response.edit_message(
-            content="Action canceled. Your custom ping template was preserved.",
-            view=None
-        )
+        await interaction.response.edit_message(content=self.cancel_message, view=None)

@@ -6,7 +6,7 @@ from database import DB_PATH
 from utils import (
     resolve_to_base_game,
     fetch_and_cache_game_from_igdb,
-    ConfirmDataDeletionView,
+    GenericConfirmationView,
     get_bot_owner_id,
     autocomplete_games
 )
@@ -121,7 +121,7 @@ class OwnerCommands(commands.Cog):
             await ctx.send(f"❌ HTTP Error: `{e}`", delete_after=5)
 
     @owner_group.command(name="subscribe_user", description="Force-subscribe a user to a game")
-    @app_commands.autocomplete(game=autocomplete_games)  # <--- Added decorator here
+    @app_commands.autocomplete(game=autocomplete_games)
     @is_bot_owner()
     async def admin_subscribe(self, interaction: discord.Interaction, user: discord.User, game: str):
         await interaction.response.defer(ephemeral=True)
@@ -212,12 +212,47 @@ class OwnerCommands(commands.Cog):
             ephemeral=True
         )
 
-    @owner_group.command(name="delete_user_data", description="Permanently delete all subscription data for a specific user")
+    @owner_group.command(name="delete_user_subscriptions", description="Permanently delete all subscription data for a specific user")
     @is_bot_owner()
-    async def admin_delete_user_data(self, interaction: discord.Interaction, user: discord.User):
-        view = ConfirmDataDeletionView(target_user_id=user.id, author_id=interaction.user.id)
+    async def admin_delete_user_subscriptions(self, interaction: discord.Interaction, user: discord.User):
+        async def do_delete_user_subs(_inter: discord.Interaction):
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("DELETE FROM subscriptions WHERE user_id = ?", (user.id,))
+                await db.commit()
+
+        view = GenericConfirmationView(
+            author_id=interaction.user.id,
+            confirm_label="Delete Subscriptions",
+            confirm_message=f"🗑️ **All subscription data for {user.mention} has been permanently deleted.**",
+            cancel_message=f"Action canceled. Subscription data for {user.mention} was preserved.",
+            on_confirm=do_delete_user_subs
+        )
+
         await interaction.response.send_message(
-            f"⚠️ **Are you sure you want to delete all data for {user.mention}?**\nThis will permanently purge all their active subscriptions.",
+            f"⚠️ **Are you sure you want to delete all subscriptions for {user.mention}?**\nThis will permanently purge all their active subscriptions.",
+            view=view,
+            ephemeral=True
+        )
+
+    @owner_group.command(name="delete_all_user_data", description="Permanently delete all data and settings for a specific user")
+    @is_bot_owner()
+    async def admin_delete_all_user_data(self, interaction: discord.Interaction, user: discord.User):
+        async def do_delete_all_user_data(_inter: discord.Interaction):
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("DELETE FROM subscriptions WHERE user_id = ?", (user.id,))
+                await db.execute("DELETE FROM user_settings WHERE user_id = ?", (user.id,))
+                await db.commit()
+
+        view = GenericConfirmationView(
+            author_id=interaction.user.id,
+            confirm_label="Delete All Data",
+            confirm_message=f"🗑️ **All subscriptions and custom settings for {user.mention} have been permanently deleted.**",
+            cancel_message=f"Action canceled. Data for {user.mention} remains untouched.",
+            on_confirm=do_delete_all_user_data
+        )
+
+        await interaction.response.send_message(
+            f"⚠️ **Are you sure you want to delete ALL data for {user.mention}?**\nThis will permanently purge their subscriptions and custom ping settings.",
             view=view,
             ephemeral=True
         )
