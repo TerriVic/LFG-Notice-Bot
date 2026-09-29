@@ -504,6 +504,15 @@ class UserCommands(commands.Cog):
         if isinstance(game_data.get("cover"), dict) and "image_id" in game_data["cover"]:
             cover_url = f"https://images.igdb.com/igdb/image/upload/t_cover_big/{game_data['cover']['image_id']}.jpg"
 
+        # Calculate subscriber count for current server
+        subscriber_count = 0
+        if interaction.guild and "id" in game_data:
+            game_id, _ = await resolve_to_base_game(game_data["id"], title)
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
+                    rows = await cursor.fetchall()
+            subscriber_count = sum(1 for row in rows if interaction.guild.get_member(row[0]))
+
         embed = discord.Embed(
             title=title,
             description=summary[:2048],
@@ -517,7 +526,8 @@ class UserCommands(commands.Cog):
         embed.add_field(name="🎮 Genres", value=genres, inline=True)
         embed.add_field(name="⭐ Rating", value=rating, inline=True)
         embed.add_field(name="📅 Release Date", value=release_date, inline=True)
-        embed.add_field(name="💻 Platforms", value=platforms, inline=False)
+        embed.add_field(name="💻 Platforms", value=platforms, inline=True)
+        embed.add_field(name="👥 Subscribers in Server", value=str(subscriber_count), inline=True)
         embed.set_footer(text="Data provided by IGDB")
 
         await interaction.followup.send(embed=embed, ephemeral=not public)
