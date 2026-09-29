@@ -182,33 +182,80 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
         # 1. Default empty input handling
         if not clean_current:
             async with aiosqlite.connect(DB_PATH) as db:
-                if boost_subscribed:
-                    query_default = """
-                                    SELECT g.name, g.is_multiplayer, CASE WHEN s.user_id IS NOT NULL THEN 1 ELSE 0 END as is_sub
-                                    FROM igdb_games g
-                                             LEFT JOIN subscriptions s ON g.id = s.game_id AND s.user_id = ?
-                                    WHERE (g.is_multiplayer = 1 OR s.user_id IS NOT NULL)
-                                      AND (g.parent_game_id IS NULL OR g.parent_game_id = 0)
-                                      AND (g.version_parent_id IS NULL OR g.version_parent_id = 0)
-                                    ORDER BY is_sub DESC, g.total_rating_count DESC, g.id
-                                    LIMIT 25 \
-                                    """
-                else:
-                    query_default = """
-                                    SELECT g.name, g.is_multiplayer, CASE WHEN s.user_id IS NOT NULL THEN 1 ELSE 0 END as is_sub
-                                    FROM igdb_games g
-                                             LEFT JOIN subscriptions s ON g.id = s.game_id AND s.user_id = ?
-                                    WHERE g.is_multiplayer = 1
-                                      AND (g.parent_game_id IS NULL OR g.parent_game_id = 0)
-                                      AND (g.version_parent_id IS NULL OR g.version_parent_id = 0)
-                                    ORDER BY g.total_rating_count DESC, g.id
-                                    LIMIT 25 \
-                                    """
+                # Filter subscriptions to members present in the current server if available
+                server_member_ids = [m.id for m in interaction.guild.members] if interaction.guild else []
 
-                async with db.execute(query_default, (user_id,)) as cursor:
+                if server_member_ids:
+                    placeholders = ",".join("?" for _ in server_member_ids)
+                    if boost_subscribed:
+                        query_default = f"""
+                            SELECT g.name, g.is_multiplayer, 
+                                   CASE WHEN s_user.user_id IS NOT NULL THEN 1 ELSE 0 END as is_sub,
+                                   COUNT(s_all.user_id) as server_sub_count
+                            FROM igdb_games g
+                            LEFT JOIN subscriptions s_user ON g.id = s_user.game_id AND s_user.user_id = ?
+                            LEFT JOIN subscriptions s_all ON g.id = s_all.game_id AND s_all.user_id IN ({placeholders})
+                            WHERE (g.is_multiplayer = 1 OR s_user.user_id IS NOT NULL)
+                              AND (g.parent_game_id IS NULL OR g.parent_game_id = 0)
+                              AND (g.version_parent_id IS NULL OR g.version_parent_id = 0)
+                            GROUP BY g.id
+                            ORDER BY is_sub DESC, server_sub_count DESC, g.total_rating_count DESC, g.id
+                            LIMIT 25
+                        """
+                    else:
+                        query_default = f"""
+                            SELECT g.name, g.is_multiplayer, 
+                                   CASE WHEN s_user.user_id IS NOT NULL THEN 1 ELSE 0 END as is_sub,
+                                   COUNT(s_all.user_id) as server_sub_count
+                            FROM igdb_games g
+                            LEFT JOIN subscriptions s_user ON g.id = s_user.game_id AND s_user.user_id = ?
+                            LEFT JOIN subscriptions s_all ON g.id = s_all.game_id AND s_all.user_id IN ({placeholders})
+                            WHERE g.is_multiplayer = 1
+                              AND (g.parent_game_id IS NULL OR g.parent_game_id = 0)
+                              AND (g.version_parent_id IS NULL OR g.version_parent_id = 0)
+                            GROUP BY g.id
+                            ORDER BY server_sub_count DESC, g.total_rating_count DESC, g.id
+                            LIMIT 25
+                        """
+                    params = (user_id, *server_member_ids)
+                else:
+                    # Fallback to global subscription count if command is executed in DMs
+                    if boost_subscribed:
+                        query_default = """
+                            SELECT g.name, g.is_multiplayer, 
+                                   CASE WHEN s_user.user_id IS NOT NULL THEN 1 ELSE 0 END as is_sub,
+                                   COUNT(s_all.user_id) as server_sub_count
+                            FROM igdb_games g
+                            LEFT JOIN subscriptions s_user ON g.id = s_user.game_id AND s_user.user_id = ?
+                            LEFT JOIN subscriptions s_all ON g.id = s_all.game_id
+                            WHERE (g.is_multiplayer = 1 OR s_user.user_id IS NOT NULL)
+                              AND (g.parent_game_id IS NULL OR g.parent_game_id = 0)
+                              AND (g.version_parent_id IS NULL OR g.version_parent_id = 0)
+                            GROUP BY g.id
+                            ORDER BY is_sub DESC, server_sub_count DESC, g.total_rating_count DESC, g.id
+                            LIMIT 25
+                        """
+                    else:
+                        query_default = """
+                            SELECT g.name, g.is_multiplayer, 
+                                   CASE WHEN s_user.user_id IS NOT NULL THEN 1 ELSE 0 END as is_sub,
+                                   COUNT(s_all.user_id) as server_sub_count
+                            FROM igdb_games g
+                            LEFT JOIN subscriptions s_user ON g.id = s_user.game_id AND s_user.user_id = ?
+                            LEFT JOIN subscriptions s_all ON g.id = s_all.game_id
+                            WHERE g.is_multiplayer = 1
+                              AND (g.parent_game_id IS NULL OR g.parent_game_id = 0)
+                              AND (g.version_parent_id IS NULL OR g.version_parent_id = 0)
+                            GROUP BY g.id
+                            ORDER BY server_sub_count DESC, g.total_rating_count DESC, g.id
+                            LIMIT 25
+                        """
+                    params = (user_id,)
+
+                async with db.execute(query_default, params) as cursor:
                     rows = await cursor.fetchall()
                     choices = []
-                    for name, is_mp, is_sub in rows:
+                    for name, is_mp, is_sub, _sub_count in rows:
                         if not GENERIC_DLC_PATTERN.search(name):
                             sp_tag = " [SP 👤]" if is_mp == 0 else ""
                             sub_tag = "⭐ " if is_sub else ""
@@ -283,8 +330,39 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                 return False
             return True
 
-        # 2. LOCAL SEARCH
+        # 2. LOCAL SEARCH & SERVER SUB COUNT PREFETCH
         async with aiosqlite.connect(DB_PATH) as db:
+            # Prefetch active subscription counts for members in the current server
+            server_sub_counts = {}
+            if interaction.guild:
+                server_member_ids = [m.id for m in interaction.guild.members]
+                if server_member_ids:
+                    placeholders = ",".join("?" for _ in server_member_ids)
+                    async with db.execute(
+                        f"""
+                        SELECT LOWER(g.name), COUNT(s.user_id)
+                        FROM subscriptions s
+                        JOIN igdb_games g ON s.game_id = g.id
+                        WHERE s.user_id IN ({placeholders})
+                        GROUP BY g.id
+                        """,
+                        server_member_ids
+                    ) as cursor:
+                        for g_name_low, cnt in await cursor.fetchall():
+                            server_sub_counts[g_name_low] = cnt
+            else:
+                # Fallback for DMs: count global subscriptions
+                async with db.execute(
+                    """
+                    SELECT LOWER(g.name), COUNT(s.user_id)
+                    FROM subscriptions s
+                    JOIN igdb_games g ON s.game_id = g.id
+                    GROUP BY g.id
+                    """
+                ) as cursor:
+                    for g_name_low, cnt in await cursor.fetchall():
+                        server_sub_counts[g_name_low] = cnt
+
             if user_searching_dlc:
                 query_t1 = """
                            SELECT g.name, g.is_multiplayer, g.total_rating_count,
@@ -293,7 +371,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                                     LEFT JOIN subscriptions s ON g.id = s.game_id AND s.user_id = ?
                            WHERE (g.name LIKE ? OR g.name LIKE ?)
                            ORDER BY g.is_multiplayer DESC, g.total_rating_count DESC
-                           LIMIT 35 \
+                           LIMIT 35
                            """
                 params_t1 = (user_id, f"{search_term}%", f"%{search_term}%")
             else:
@@ -307,7 +385,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                              AND (g.version_parent_id IS NULL OR g.version_parent_id = 0)
                              AND (g.name LIKE ? OR g.name LIKE ?)
                            ORDER BY g.is_multiplayer DESC, g.total_rating_count DESC
-                           LIMIT 35 \
+                           LIMIT 35
                            """
                 params_t1 = (user_id, f"{search_term}%", f"%{search_term}%")
 
@@ -318,7 +396,9 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                         match_tier, similarity = compute_match_score(name, search_term)
                         if should_keep_candidate(name, rating_cnt, match_tier, similarity):
                             sort_score = get_sort_score(match_tier, is_mp, is_sub)
-                            choice_candidates.append((sort_score, -similarity, -(rating_cnt or 0), name, is_mp, is_sub))
+                            sub_cnt = server_sub_counts.get(name.lower(), 0)
+                            # Tuple structure: (sort_score, -similarity, -sub_cnt, -rating_cnt, name, is_mp, is_sub)
+                            choice_candidates.append((sort_score, -similarity, -sub_cnt, -(rating_cnt or 0), name, is_mp, is_sub))
                             seen_names.add(name.lower())
 
             # 2b. EXPLICIT DB FETCH FOR EXACT MATCH
@@ -329,7 +409,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                               FROM igdb_games g
                                        LEFT JOIN subscriptions s ON g.id = s.game_id AND s.user_id = ?
                               WHERE g.name = ? COLLATE NOCASE
-                              LIMIT 1 \
+                              LIMIT 1
                               """
                 async with db.execute(query_exact, (user_id, search_term)) as cursor:
                     exact_row = await cursor.fetchone()
@@ -337,7 +417,8 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                         name, is_mp, rating_cnt, is_sub = exact_row
                         match_tier, similarity = compute_match_score(name, search_term)
                         sort_score = get_sort_score(match_tier, is_mp, is_sub)
-                        choice_candidates.append((sort_score, -similarity, -(rating_cnt or 0), name, is_mp, is_sub))
+                        sub_cnt = server_sub_counts.get(name.lower(), 0)
+                        choice_candidates.append((sort_score, -similarity, -sub_cnt, -(rating_cnt or 0), name, is_mp, is_sub))
                         seen_names.add(name.lower())
 
         # 3. LIVE IGDB SEARCH
@@ -386,20 +467,21 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                                         match_tier, similarity = compute_match_score(g_name, search_term)
                                         if should_keep_candidate(g_name, r_cnt, match_tier, similarity):
                                             sort_score = get_sort_score(match_tier, is_mp, 0)
-                                            choice_candidates.append((sort_score, -similarity, -(r_cnt or 0), g_name, is_mp, 0))
+                                            sub_cnt = server_sub_counts.get(g_name.lower(), 0)
+                                            choice_candidates.append((sort_score, -similarity, -sub_cnt, -(r_cnt or 0), g_name, is_mp, 0))
                                             seen_names.add(g_name.lower())
                 except Exception as e:
                     print(f"IGDB Autocomplete Exception: {e}")
                     pass
 
         # 4. SORTING & DISCORD CHOICE GENERATION
-        choice_candidates.sort(key=lambda x: (x[0], x[1], x[2], len(x[3])))
+        choice_candidates.sort(key=lambda x: (x[0], x[2], x[3], x[1], len(x[4])))
 
         choices = []
         for item in choice_candidates[:25]:
-            g_name = item[3]
-            is_mp = item[4]
-            is_sub = item[5]
+            g_name = item[4]
+            is_mp = item[5]
+            is_sub = item[6]
 
             sp_tag = " [SP 👤]" if is_mp == 0 else ""
             sub_tag = "⭐ " if is_sub else ""
