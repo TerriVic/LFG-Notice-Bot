@@ -1,6 +1,6 @@
 # Project Contributors
 
-Thank you to everyone who has contributed to the project!
+Huge thanks to all support, friendship, belief and contributions! <3 
 
 | Contributor | Role                         | GitSashie                             |
 |:------------|:-----------------------------|:--------------------------------------|
