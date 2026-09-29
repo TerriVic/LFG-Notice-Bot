@@ -128,3 +128,16 @@ python bot.py
 ## License & Privacy
 
 This project stores minimal user data (Discord User IDs, game preferences, and channel IDs for server trackers) strictly required for bot functionality. Read the full details in [`Privacy Policy.md`](./Privacy%20Policy.md).
+
+## Credits & Acknowledgements
+
+### Human Contributors
+* **[Vic](https://git.sashie.me/Vic/)** - Lead Developer & Maintainer
+* **[Sasha](https://git.sashie.me/sasha)** - Support, Friendship, Infrastructure, Server Hosting & CI/CD Deployment
+
+### AI Assistance & Attribution
+This project was developed with the assistance of Generative AI tools:
+* **[Google Gemini](https://gemini.google.com/)**: Used for architecture design, feature drafting, regex filtering, and documentation templates.
+* **[GitHub Copilot](https://github.com/features/copilot)**: Used for Discord application setup
+
+> **Disclaimer:** AI tools were used as assistive pair-programmers. All generated code has been manually reviewed, edited, tested, and validated by human maintainers. The maintainers take full responsibility for the security, quality, and functionality of this codebase.
