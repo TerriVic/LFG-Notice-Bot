@@ -2,7 +2,7 @@
 
 > _"Hi! I allow you to subscribe to a list of games, and when one of those games is mentioned, you will also be automatically tagged so you can team up and start playing with people."_
 
-A feature-rich Discord slash-command bot built with Python and `discord.py` that allows server members to subscribe to their favorite games and receive targeted pings when others are looking for a group (LFG)[cite: 9, 10]. Powered by the IGDB database for comprehensive game search and metadata caching.
+A feature-rich Discord slash-command bot built with Python and `discord.py` that allows server members to subscribe to their favorite games and receive targeted pings when others are looking for a group (LFG). Powered by the IGDB database for comprehensive game search and metadata caching.
 
 ---
 
@@ -10,7 +10,7 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 
 * **Targeted LFG Notifications:** Notify only players interested in a specific game without relying on mass `@everyone` or `@here` mentions.
 * **IGDB Database Integration:** Autocomplete and search millions of games directly from IGDB, automatically resolving special/deluxe editions to base games.
-* **Live Top Games Leaderboard:** Post dynamic, self-updating embed trackers displaying the server's most popular games[cite: 10, 11].
+* **Live Top Games Leaderboard:** Post dynamic, self-updating embed trackers displaying the server's most popular games.
 * **Custom Ping Templates:** Customize individual ping formatting and templates to suit your style.
 * **Privacy & Data Ownership:** Native `/delete_all_my_data`, `/delete_my_subscriptions`, and `/unsubscribe` commands give users total control over their stored preferences.
 * **Docker Ready:** Multi-stage Docker deployment setup with SQLite database persistence.
