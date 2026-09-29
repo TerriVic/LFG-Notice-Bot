@@ -42,6 +42,8 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 | `/config edit_top_games <message> [limit] [interval]` | Update display limit or interval settings (e.g., `0.5` for 30m), or leave options empty to force an immediate refresh.                                             |
 | `/config force_update_top_games <message>`            | Force an immediate refresh on an active live tracker message.                                                                                                      |
 | `/config remove_top_games <message>`                  | Stop tracking and delete an active live top games message.                                                                                                         |
+| `/config server_overview`                             | View subscription details for members in the server where the command is called                                                                                    |
+
 
 ---
 

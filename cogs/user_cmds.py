@@ -554,6 +554,7 @@ class UserCommands(commands.Cog):
                     f"• {fmt('config', 'edit_top_games')} `<message> [limit] [interval]` — Edit tracker settings or force a refresh if options are left empty.\n"
                     f"• {fmt('config', 'force_update_top_games')} `<message>` — Force an immediate refresh on a live tracker.\n"
                     f"• {fmt('config', 'remove_top_games')} `<message>` — Stop tracking and delete an active live top games message."
+                    f"• {fmt('config', 'server_overview')} — View subscription details for members in this server."
                 ),
                 inline=False
             )
