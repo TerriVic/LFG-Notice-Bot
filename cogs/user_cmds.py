@@ -485,7 +485,10 @@ class UserCommands(commands.Cog):
         await interaction.followup.send(embed=embed, ephemeral=not public)
 
     @app_commands.command(name="help", description="Show information about available bot commands")
-    async def help_command(self, interaction: discord.Interaction):
+    @app_commands.describe(
+        public="Set to True to share publicly (default: False)"
+    )
+    async def help_command(self, interaction: discord.Interaction, public: bool = False):
         # Lookup helper: supports standalone commands or group subcommands
         def fmt(name: str, sub: str = None) -> str:
             cid = getattr(self.bot, "command_ids", {}).get(name)
@@ -497,7 +500,8 @@ class UserCommands(commands.Cog):
         embed = discord.Embed(
             title="Bot Command Guide",
             description="Here is everything you can do with the bot:\n"
-                        "-# Options marked `[public]` are visible only to you by default. Set `public: True` to share them in channel.",
+                        "-# Responses to commands with variable `[public]` are visible only to you by default. Set `public: True` to share them in channel.\n"
+                        f"-# All other command responses, (aside from {fmt('ping_game')}) are always private.",
             color=discord.Color.blue()
         )
 
@@ -507,7 +511,7 @@ class UserCommands(commands.Cog):
                 f"• {fmt('game_info')} `<game>` `[public]` — Get details, genres, and cover image for a game.\n"
                 f"• {fmt('subscribe')} `<game>` — Subscribe to LFG notifications.\n"
                 f"• {fmt('unsubscribe')} `<game>` — Unsubscribe from active notifications.\n"
-                f"• {fmt('user_subscriptions')} — View active subscriptions."
+                f"• {fmt('user_subscriptions')} `[user]` — View active subscriptions of specified user (defaults to self)."
             ),
             inline=False
         )
@@ -520,8 +524,14 @@ class UserCommands(commands.Cog):
                 f"• {fmt('view_ping_template')} — View your saved ping format.\n"
                 f"• {fmt('reset_ping_template')} — Reset ping format to default.\n"
                 f"• {fmt('top_games')} `[limit]` `[public]` — View popular server games.\n"
-                f"• {fmt('show_subscribers')} `<game>` — List subscribers."
+                f"• {fmt('show_subscribers')} `<game>` — List subscribers for specified game."
             ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="Misc.",
+            value=f"• {fmt('help')} `[public]` — Displays this help message.",
             inline=False
         )
 
@@ -550,7 +560,7 @@ class UserCommands(commands.Cog):
 
         embed.set_footer(text="Looking for a missing game or DLC? Type its full name in /subscribe!")
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral= not public)
 
 async def setup(bot):
     await bot.add_cog(UserCommands(bot))
