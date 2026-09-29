@@ -177,8 +177,13 @@ async def auto_migrate_multiplayer_flags():
     async with aiosqlite.connect(DB_PATH) as db:
         cleanup_query = """
                         DELETE FROM igdb_games
-                        WHERE is_multiplayer = 0
-                          AND id NOT IN (SELECT DISTINCT game_id FROM subscriptions) \
+                        WHERE id NOT IN (SELECT DISTINCT game_id FROM subscriptions)
+                          AND (
+                            is_multiplayer = 0
+                                OR parent_game_id IS NOT NULL
+                                OR version_parent_id IS NOT NULL
+                                OR category NOT IN (0, 8, 9, 10, 11)
+                            )
                         """
         cursor = await db.execute(cleanup_query)
         deleted_count = cursor.rowcount

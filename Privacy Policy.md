@@ -26,7 +26,8 @@ Stored data is used exclusively to:
 ## 4. Data Retention & Removal
 * **Self-Service Subscription Removal:** Running `/unsubscribe` for a game immediately deletes that subscription entry from the database.
 * **Template Reset:** Running `/reset_ping_template` clears your stored custom message template.
-* **Full User Data Deletion:** Running `/delete_my_data` allows you to immediately purge all active game subscriptions from the bot's database via an interactive confirmation.
+* **Subscription Data Deletion:** Running `/delete_my_subscriptions` allows you to immediately purge all active game subscriptions from the bot's database via an interactive confirmation.
+* **Full User Data Deletion:** Running `/delete_all_my_data` allows you to immediately purge all active game subscriptions and your custom ping templates from the bot's database via an interactive confirmation.
 
 ## 5. Contact
 If you have questions or privacy concerns regarding LFG Notice Bot, please contact the bot developer or server administrator.

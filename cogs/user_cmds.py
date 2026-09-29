@@ -10,7 +10,8 @@ from utils import (
     resolve_to_base_game,
     autocomplete_games,
     fetch_and_cache_game_from_igdb,
-    ConfirmDataDeletionView, fetch_game_details_from_igdb
+    fetch_game_details_from_igdb,
+    GenericConfirmationView
 )
 
 
@@ -192,15 +193,17 @@ class UserCommands(commands.Cog):
 
             game_id, official_name = await resolve_to_base_game(row[0], row[1])
 
-            async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
+            # Fetch subscribers, excluding the user executing the command
+            async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ? AND user_id != ?", (game_id, interaction.user.id)) as cursor:
                 users = await cursor.fetchall()
 
             # Retrieve user custom template if saved
             async with db.execute("SELECT ping_template FROM user_settings WHERE user_id = ?", (interaction.user.id,)) as cursor:
                 template_row = await cursor.fetchone()
 
+        # Handle case where no other users are subscribed
         if not users:
-            await interaction.followup.send(f"No subscribers for **{official_name}**.")
+            await interaction.followup.send(f"No other subscribers to ping for **{official_name}**.")
             return
 
         mentions = " ".join(f"<@{u[0]}>" for u in users)
@@ -257,12 +260,16 @@ class UserCommands(commands.Cog):
             )
             await db.commit()
 
+        # Dummy mentions for template preview
+        mock_caller = interaction.user.mention
+        mock_mentions = "<@123456789012345678>"
+
         preview = (
-            final_template
-            .replace("{caller}", interaction.user.mention)
+            template
+            .replace("{caller}", mock_caller)
             .replace("{user}", interaction.user.mention)
-            .replace("{game}", "**Helldivers 2**")
-            .replace("{mentions}", interaction.user.mention)
+            .replace("{game}", "**Wardogs**")
+            .replace("{mentions}", mock_mentions)
             .replace("{note}", "Looking for 2 more!")
         )
 
@@ -287,12 +294,16 @@ class UserCommands(commands.Cog):
             return
 
         template = row[0]
+
+        # Dummy mentions for template preview
+        mock_caller = interaction.user.mention
+        mock_mentions = "<@123456789012345678>"
         preview = (
             template
-            .replace("{caller}", interaction.user.mention)
+            .replace("{caller}", mock_caller)
             .replace("{user}", interaction.user.mention)
-            .replace("{game}", "**Helldivers 2**")
-            .replace("{mentions}", interaction.user.mention)
+            .replace("{game}", "**Wardogs**")
+            .replace("{mentions}", mock_mentions)
             .replace("{note}", "Looking for 2 more!")
         )
 
@@ -304,11 +315,26 @@ class UserCommands(commands.Cog):
 
     @app_commands.command(name="reset_ping_template", description="Reset your ping template back to default")
     async def reset_ping_template(self, interaction: discord.Interaction):
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("DELETE FROM user_settings WHERE user_id = ?", (interaction.user.id,))
-            await db.commit()
+        # ... (check if setting exists) ...
 
-        await interaction.response.send_message("✅ Your ping template has been reset to the default format!", ephemeral=True)
+        async def do_reset(_inter: discord.Interaction):
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("DELETE FROM user_settings WHERE user_id = ?", (interaction.user.id,))
+                await db.commit()
+
+        view = GenericConfirmationView(
+            author_id=interaction.user.id,
+            confirm_label="Reset Template",
+            confirm_message="✅ Your ping template has been reset to the default format!",
+            cancel_message="Action canceled. Your custom ping template was preserved.",
+            on_confirm=do_reset
+        )
+
+        await interaction.response.send_message(
+            "Are you **sure** you want to reset your custom ping template back to default?",
+            view=view,
+            ephemeral=True
+        )
 
     @app_commands.command(name="user_subscriptions", description="View subscriptions for yourself or another user.")
     async def user_subscriptions(self, interaction: discord.Interaction, user: discord.User = None, public: bool = False):
@@ -397,11 +423,45 @@ class UserCommands(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none()
         )
 
-    @app_commands.command(name="delete_my_data", description="Permanently delete all your subscription data from the bot")
-    async def delete_my_data(self, interaction: discord.Interaction):
-        view = ConfirmDataDeletionView(target_user_id=interaction.user.id)
+    @app_commands.command(name="delete_my_subscriptions", description="Permanently delete all your subscription data")
+    async def delete_my_subscriptions(self, interaction: discord.Interaction):
+        async def do_delete_subs(_inter: discord.Interaction):
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("DELETE FROM subscriptions WHERE user_id = ?", (interaction.user.id,))
+                await db.commit()
+
+        view = GenericConfirmationView(
+            author_id=interaction.user.id,
+            confirm_label="Confirm Deletion",
+            confirm_message="**All your active game subscriptions have been deleted.**",
+            cancel_message="Action canceled. Subscription data was preserved.",
+            on_confirm=do_delete_subs
+        )
+
         await interaction.response.send_message(
-            "⚠️ **Are you sure you want to delete all your data?**\nThis will immediately remove all your active game subscriptions.",
+            "⚠️ **Are you sure you want to delete your subscriptions?**",
+            view=view,
+            ephemeral=True
+        )
+
+    @app_commands.command(name="delete_all_my_data", description="Permanently delete all your data and settings (e.g., ping templates).")
+    async def delete_all_my_data(self, interaction: discord.Interaction):
+        async def do_delete_all(_inter: discord.Interaction):
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("DELETE FROM subscriptions WHERE user_id = ?", (interaction.user.id,))
+                await db.execute("DELETE FROM user_settings WHERE user_id = ?", (interaction.user.id,))
+                await db.commit()
+
+        view = GenericConfirmationView(
+            author_id=interaction.user.id,
+            confirm_label="Delete All Data",
+            confirm_message="🗑️ **All your subscriptions and custom settings have been permanently deleted.**",
+            cancel_message="Action canceled. Your data remains untouched.",
+            on_confirm=do_delete_all
+        )
+
+        await interaction.response.send_message(
+            "⚠️ **Are you sure you want to delete ALL your data?**\nThis will remove subscriptions and custom ping settings.",
             view=view,
             ephemeral=True
         )
@@ -444,6 +504,15 @@ class UserCommands(commands.Cog):
         if isinstance(game_data.get("cover"), dict) and "image_id" in game_data["cover"]:
             cover_url = f"https://images.igdb.com/igdb/image/upload/t_cover_big/{game_data['cover']['image_id']}.jpg"
 
+        # Calculate subscriber count for current server
+        subscriber_count = 0
+        if interaction.guild and "id" in game_data:
+            game_id, _ = await resolve_to_base_game(game_data["id"], title)
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
+                    rows = await cursor.fetchall()
+            subscriber_count = sum(1 for row in rows if interaction.guild.get_member(row[0]))
+
         embed = discord.Embed(
             title=title,
             description=summary[:2048],
@@ -457,13 +526,17 @@ class UserCommands(commands.Cog):
         embed.add_field(name="🎮 Genres", value=genres, inline=True)
         embed.add_field(name="⭐ Rating", value=rating, inline=True)
         embed.add_field(name="📅 Release Date", value=release_date, inline=True)
-        embed.add_field(name="💻 Platforms", value=platforms, inline=False)
+        embed.add_field(name="💻 Platforms", value=platforms, inline=True)
+        embed.add_field(name="👥 Subscribers in Server", value=str(subscriber_count), inline=True)
         embed.set_footer(text="Data provided by IGDB")
 
         await interaction.followup.send(embed=embed, ephemeral=not public)
 
     @app_commands.command(name="help", description="Show information about available bot commands")
-    async def help_command(self, interaction: discord.Interaction):
+    @app_commands.describe(
+        public="Set to True to share publicly (default: False)"
+    )
+    async def help_command(self, interaction: discord.Interaction, public: bool = False):
         # Lookup helper: supports standalone commands or group subcommands
         def fmt(name: str, sub: str = None) -> str:
             cid = getattr(self.bot, "command_ids", {}).get(name)
@@ -475,7 +548,8 @@ class UserCommands(commands.Cog):
         embed = discord.Embed(
             title="Bot Command Guide",
             description="Here is everything you can do with the bot:\n"
-                        "-# Options marked `[public]` are visible only to you by default. Set `public: True` to share them in channel.",
+                        "-# Responses to commands with variable `[public]` are visible only to you by default. Set `public: True` to share them in channel.\n"
+                        f"-# All other command responses, (aside from {fmt('ping_game')}) are always private.",
             color=discord.Color.blue()
         )
 
@@ -485,7 +559,8 @@ class UserCommands(commands.Cog):
                 f"• {fmt('game_info')} `<game>` `[public]` — Get details, genres, and cover image for a game.\n"
                 f"• {fmt('subscribe')} `<game>` — Subscribe to LFG notifications.\n"
                 f"• {fmt('unsubscribe')} `<game>` — Unsubscribe from active notifications.\n"
-                f"• {fmt('user_subscriptions')} — View active subscriptions."
+                f"• {fmt('user_subscriptions')} `[user]` — View active subscriptions of specified user (defaults to self).\n"
+                f"• {fmt('delete_my_subscriptions')} — Delete your active game subscriptions."
             ),
             inline=False
         )
@@ -498,17 +573,24 @@ class UserCommands(commands.Cog):
                 f"• {fmt('view_ping_template')} — View your saved ping format.\n"
                 f"• {fmt('reset_ping_template')} — Reset ping format to default.\n"
                 f"• {fmt('top_games')} `[limit]` `[public]` — View popular server games.\n"
-                f"• {fmt('show_subscribers')} `<game>` — List subscribers."
+                f"• {fmt('show_subscribers')} `<game>` — List subscribers for specified game."
             ),
             inline=False
         )
 
         embed.add_field(
-            name="Data & Privacy",
-            value=f"• {fmt('delete_my_data')} — Delete your subscription data.",
+            name="Misc.",
+            value=f"• {fmt('help')} `[public]` — Displays this help message.",
             inline=False
         )
 
+        embed.add_field(
+            name="Data & Privacy",
+            value=(
+                f"• {fmt('delete_all_my_data')} — Delete all subscriptions and settings (e.g., ping templates)."
+            ),
+            inline=False
+        )
 
                 # Conditionally display admin section if user has Administrator permissions
         is_admin = interaction.permissions and interaction.permissions.administrator
@@ -522,13 +604,14 @@ class UserCommands(commands.Cog):
                     f"• {fmt('config', 'edit_top_games')} `<message> [limit] [interval]` — Edit tracker settings or force a refresh if options are left empty.\n"
                     f"• {fmt('config', 'force_update_top_games')} `<message>` — Force an immediate refresh on a live tracker.\n"
                     f"• {fmt('config', 'remove_top_games')} `<message>` — Stop tracking and delete an active live top games message."
+                    f"• {fmt('config', 'server_overview')} — View subscription details for members in this server."
                 ),
                 inline=False
             )
 
         embed.set_footer(text="Looking for a missing game or DLC? Type its full name in /subscribe!")
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral= not public)
 
 async def setup(bot):
     await bot.add_cog(UserCommands(bot))

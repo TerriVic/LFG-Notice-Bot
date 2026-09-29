@@ -10,7 +10,8 @@ from cogs.background_tasks import refresh_live_top_games
 from database import DB_PATH
 from utils import (
     format_interval,
-    get_bot_owner_id
+    get_bot_owner_id,
+    GenericConfirmationView
 )
 
 def is_owner_or_moderator():
@@ -58,39 +59,6 @@ async def autocomplete_live_messages(interaction: discord.Interaction, current: 
 
     return choices[:25]
 
-class ConfirmDuplicateSetupView(discord.ui.View):
-    def __init__(self, author_id: int):
-        super().__init__(timeout=60.0)
-        self.author_id = author_id
-        self.value: bool | None = None
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("You cannot use these buttons.", ephemeral=True)
-            return False
-        return True
-
-    # noinspection PyTypeChecker
-    @discord.ui.button(label="Create Tracker Anyway", style=discord.ButtonStyle.primary)
-    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
-        self.value = True
-        self.stop()
-        await interaction.response.defer()
-
-    # noinspection PyTypeChecker
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
-        self.value = False
-        self.stop()
-        await interaction.response.edit_message(
-            content="❌ Setup canceled. No new tracker message was posted.",
-            view=None
-        )
-
-    async def on_timeout(self):
-        self.value = None
-        self.stop()
-
 class AdminCommands(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -122,9 +90,42 @@ class AdminCommands(commands.Cog):
         clean_limit = max(1, min(limit, 25))
         clean_interval = max(0.25, min(interval, 168.0))
 
-        prompt_msg = None
+        # Internal helper to create the tracker message and DB entry
+        async def create_tracker() -> str:
+            embed = discord.Embed(
+                title=f"📊 Live Top {clean_limit} Games",
+                description="Initializing...",
+                color=discord.Color.gold()
+            )
 
-        # 2. Check for existing tracker confirmation
+            try:
+                message = await interaction.channel.send(embed=embed)
+            except discord.Forbidden:
+                return "❌ Bot lacks permission to send messages or embeds in this channel."
+
+            try:
+                async with aiosqlite.connect(DB_PATH) as inner_db:
+                    await inner_db.execute(
+                        """
+                        INSERT INTO live_top_games (message_id, guild_id, channel_id, entry_limit, update_interval, last_updated, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (message.id, interaction.guild.id, interaction.channel.id, clean_limit, clean_interval, 0, int(time.time()))
+                    )
+                    await inner_db.commit()
+
+                await refresh_live_top_games(self.bot, force=True)
+                return f"✅ Live top games tracker posted! (Top {clean_limit}, {format_interval(clean_interval)})"
+            except Exception as e:
+                print(f"[Setup Error] {e}")
+                # noinspection PyBroadException
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                return f"❌ Failed to set up live tracker: `{e}`"
+
+        # Check for existing tracker in this server
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
                 "SELECT channel_id, created_at FROM live_top_games WHERE guild_id = ? ORDER BY created_at DESC LIMIT 1",
@@ -135,77 +136,28 @@ class AdminCommands(commands.Cog):
         if existing:
             ch_id, created_at = existing
             time_formatted = f"<t:{created_at}:f> (<t:{created_at}:R>)" if created_at else "an unknown date"
-            view = ConfirmDuplicateSetupView(author_id=interaction.user.id)
 
-            # Send prompt via followup since interaction was deferred upfront
-            prompt_msg = await interaction.followup.send(
+            async def do_confirm(_inter: discord.Interaction):
+                result_text = await create_tracker()
+                view.confirm_message = result_text
+
+            view = GenericConfirmationView(
+                author_id=interaction.user.id,
+                confirm_label="Create Tracker Anyway",
+                cancel_message="❌ Setup canceled. No new tracker message was posted.",
+                on_confirm=do_confirm,
+                timeout=60.0
+            )
+
+            await interaction.followup.send(
                 f"⚠️ A live top games tracker already exists in <#{ch_id}>, sent on {time_formatted}.\n"
                 "Are you sure you want to create another one?",
                 view=view,
                 ephemeral=True
             )
-
-            await view.wait()
-
-            # If user clicked Cancel or timed out, stop execution
-            if not view.value:
-                if view.value is None:
-                    try:
-                        await prompt_msg.edit(content="⏳ Setup timed out.", view=None)
-                    except Exception:
-                        pass
-                return
-
-            # User confirmed -> update prompt status and proceed
-            try:
-                await prompt_msg.edit(content="⏳ Creating new tracker...", view=None)
-            except Exception:
-                pass
-
-        # 3. Post placeholder message & insert into database
-        embed = discord.Embed(title=f"📊 Live Top {clean_limit} Games", description="Initializing...", color=discord.Color.gold())
-
-        try:
-            message = await interaction.channel.send(embed=embed)
-        except discord.Forbidden:
-            fail_text = "❌ Bot lacks permission to send messages or embeds in this channel."
-            if prompt_msg:
-                await prompt_msg.edit(content=fail_text)
-            else:
-                await interaction.followup.send(fail_text, ephemeral=True)
-            return
-
-        try:
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute(
-                    """
-                    INSERT INTO live_top_games (message_id, guild_id, channel_id, entry_limit, update_interval, last_updated, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (message.id, interaction.guild.id, interaction.channel.id, clean_limit, clean_interval, 0, int(time.time()))
-                )
-                await db.commit()
-
-            await refresh_live_top_games(self.bot, force=True)
-
-            success_text = f"✅ Live top games tracker posted! (Top {clean_limit}, {format_interval(clean_interval)})"
-            if prompt_msg:
-                await prompt_msg.edit(content=success_text)
-            else:
-                await interaction.followup.send(success_text, ephemeral=True)
-        except Exception as e:
-            print(f"[Setup Error] {e}")
-            # noinspection PyBroadException
-            try:
-                await message.delete()
-            except Exception:
-                pass
-
-            err_text = f"❌ Failed to set up live tracker: `{e}`"
-            if prompt_msg:
-                await prompt_msg.edit(content=err_text)
-            else:
-                await interaction.followup.send(err_text, ephemeral=True)
+        else:
+            status_text = await create_tracker()
+            await interaction.followup.send(status_text, ephemeral=True)
 
     @mod_group.command(name="remove_top_games", description="Delete a live top games tracker message")
     @app_commands.describe(message="Select the live tracker message to remove")
@@ -345,6 +297,91 @@ class AdminCommands(commands.Cog):
             f"✅ Tracker message updated successfully! ({', '.join(changes)})",
             ephemeral=True
         )
+
+    @mod_group.command(
+        name="server_overview",
+        description="View subscription details for members in this server"
+    )
+    @is_owner_or_moderator()
+    async def server_overview(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("This command must be run inside a server.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                    """
+                    SELECT s.user_id, g.name
+                    FROM subscriptions s
+                             JOIN igdb_games g ON s.game_id = g.id
+                    ORDER BY s.user_id, g.name
+                    """
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        if not rows:
+            await interaction.followup.send("📊 **Server Overview:** No active subscriptions found.", ephemeral=True)
+            return
+
+        # Aggregate subscriptions per user ID, keeping ONLY members in this guild
+        user_map: dict[int, list[str]] = {}
+        total_subscriptions = 0
+
+        for user_id, game_name in rows:
+            # Check if user is currently in this server cache
+            member = interaction.guild.get_member(user_id)
+            if member:
+                user_map.setdefault(user_id, []).append(game_name)
+                total_subscriptions += 1
+
+        if not user_map:
+            await interaction.followup.send(
+                f"📊 **Server Overview:** No members in **{interaction.guild.name}** have active subscriptions.",
+                ephemeral=True
+            )
+            return
+
+        total_users = len(user_map)
+
+        # Build description lines
+        lines = [
+            f"**Total Server Subscribers:** {total_users} | **Total Subscriptions:** {total_subscriptions}\n"
+        ]
+
+        for user_id, games in user_map.items():
+            member = interaction.guild.get_member(user_id)
+            user_label = f"**{member.display_name}** (<@{user_id}>)" if member else f"<@{user_id}>"
+
+            games_str = ", ".join(f"`{g}`" for g in games)
+            lines.append(f"• {user_label} ({len(games)}): {games_str}")
+
+        # Chunk lines into multiple embeds if message exceeds Discord's character limits
+        embeds = []
+        current_embed = discord.Embed(
+            title=f"🏰 Subscriptions Overview for **{interaction.guild.name}**",
+            color=discord.Color.blue()
+        )
+        current_text = ""
+
+        for line in lines:
+            if len(current_text) + len(line) + 1 > 3800:
+                current_embed.description = current_text
+                embeds.append(current_embed)
+                current_embed = discord.Embed(color=discord.Color.blue())
+                current_text = line + "\n"
+            else:
+                current_text += line + "\n"
+
+        if current_text:
+            current_embed.description = current_text
+            embeds.append(current_embed)
+
+        # Send through followup messages
+        await interaction.followup.send(embed=embeds[0], ephemeral=True)
+        for extra_embed in embeds[1:]:
+            await interaction.followup.send(embed=extra_embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
