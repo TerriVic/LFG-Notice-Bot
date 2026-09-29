@@ -346,6 +346,91 @@ class AdminCommands(commands.Cog):
             ephemeral=True
         )
 
+    @mod_group.command(
+        name="server_overview",
+        description="View subscription details for members in this server"
+    )
+    @is_owner_or_moderator()
+    async def server_overview(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("This command must be run inside a server.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                    """
+                    SELECT s.user_id, g.name
+                    FROM subscriptions s
+                             JOIN igdb_games g ON s.game_id = g.id
+                    ORDER BY s.user_id, g.name
+                    """
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        if not rows:
+            await interaction.followup.send("📊 **Server Overview:** No active subscriptions found.", ephemeral=True)
+            return
+
+        # Aggregate subscriptions per user ID, keeping ONLY members in this guild
+        user_map: dict[int, list[str]] = {}
+        total_subscriptions = 0
+
+        for user_id, game_name in rows:
+            # Check if user is currently in this server cache
+            member = interaction.guild.get_member(user_id)
+            if member:
+                user_map.setdefault(user_id, []).append(game_name)
+                total_subscriptions += 1
+
+        if not user_map:
+            await interaction.followup.send(
+                f"📊 **Server Overview:** No members in **{interaction.guild.name}** have active subscriptions.",
+                ephemeral=True
+            )
+            return
+
+        total_users = len(user_map)
+
+        # Build description lines
+        lines = [
+            f"**Total Server Subscribers:** {total_users} | **Total Subscriptions:** {total_subscriptions}\n"
+        ]
+
+        for user_id, games in user_map.items():
+            member = interaction.guild.get_member(user_id)
+            user_label = f"**{member.display_name}** (<@{user_id}>)" if member else f"<@{user_id}>"
+
+            games_str = ", ".join(f"`{g}`" for g in games)
+            lines.append(f"• {user_label} ({len(games)}): {games_str}")
+
+        # Chunk lines into multiple embeds if message exceeds Discord's character limits
+        embeds = []
+        current_embed = discord.Embed(
+            title=f"🏰 Subscriptions Overview for **{interaction.guild.name}**",
+            color=discord.Color.blue()
+        )
+        current_text = ""
+
+        for line in lines:
+            if len(current_text) + len(line) + 1 > 3800:
+                current_embed.description = current_text
+                embeds.append(current_embed)
+                current_embed = discord.Embed(color=discord.Color.blue())
+                current_text = line + "\n"
+            else:
+                current_text += line + "\n"
+
+        if current_text:
+            current_embed.description = current_text
+            embeds.append(current_embed)
+
+        # Send through followup messages
+        await interaction.followup.send(embed=embeds[0], ephemeral=True)
+        for extra_embed in embeds[1:]:
+            await interaction.followup.send(embed=extra_embed, ephemeral=True)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(AdminCommands(bot))
