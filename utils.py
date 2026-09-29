@@ -163,36 +163,73 @@ async def resolve_to_base_game(game_id: int, official_name: str) -> tuple[int, s
 
     return game_id, official_name
 
-async def autocomplete_games(_interaction: discord.Interaction, current: str):
+async def autocomplete_games(interaction: discord.Interaction, current: str):
     try:
         clean_current = current.strip().replace("’", "'").replace("‘", "'").replace('"', '')
+
+        # Safely resolve target user if passed via command interaction namespace
+        user_id = interaction.user.id
+        if hasattr(interaction, "namespace") and getattr(interaction.namespace, "user", None):
+            target_user = interaction.namespace.user
+            if hasattr(target_user, "id"):
+                user_id = target_user.id
+
+        # Only boost subscribed games to the top if the command is /ping_game
+        boost_subscribed = bool(
+            interaction.command and interaction.command.name == "ping_game"
+        )
 
         # 1. Default empty input handling
         if not clean_current:
             async with aiosqlite.connect(DB_PATH) as db:
-                query_default = """
-                                SELECT name
-                                FROM igdb_games
-                                WHERE is_multiplayer = 1
-                                  AND (parent_game_id IS NULL OR parent_game_id = 0)
-                                  AND (version_parent_id IS NULL OR version_parent_id = 0)
-                                ORDER BY total_rating_count DESC, id
-                                    LIMIT 25
-                                """
-                async with db.execute(query_default) as cursor:
+                if boost_subscribed:
+                    query_default = """
+                                    SELECT g.name, g.is_multiplayer, CASE WHEN s.user_id IS NOT NULL THEN 1 ELSE 0 END as is_sub
+                                    FROM igdb_games g
+                                             LEFT JOIN subscriptions s ON g.id = s.game_id AND s.user_id = ?
+                                    WHERE (g.is_multiplayer = 1 OR s.user_id IS NOT NULL)
+                                      AND (g.parent_game_id IS NULL OR g.parent_game_id = 0)
+                                      AND (g.version_parent_id IS NULL OR g.version_parent_id = 0)
+                                    ORDER BY is_sub DESC, g.total_rating_count DESC, g.id
+                                    LIMIT 25 \
+                                    """
+                else:
+                    query_default = """
+                                    SELECT g.name, g.is_multiplayer, CASE WHEN s.user_id IS NOT NULL THEN 1 ELSE 0 END as is_sub
+                                    FROM igdb_games g
+                                             LEFT JOIN subscriptions s ON g.id = s.game_id AND s.user_id = ?
+                                    WHERE g.is_multiplayer = 1
+                                      AND (g.parent_game_id IS NULL OR g.parent_game_id = 0)
+                                      AND (g.version_parent_id IS NULL OR g.version_parent_id = 0)
+                                    ORDER BY g.total_rating_count DESC, g.id
+                                    LIMIT 25 \
+                                    """
+
+                async with db.execute(query_default, (user_id,)) as cursor:
                     rows = await cursor.fetchall()
-                    return [app_commands.Choice(name=r[0][:100], value=r[0][:100]) for r in rows if not GENERIC_DLC_PATTERN.search(r[0])]
+                    choices = []
+                    for name, is_mp, is_sub in rows:
+                        if not GENERIC_DLC_PATTERN.search(name):
+                            sp_tag = " [SP 👤]" if is_mp == 0 else ""
+                            sub_tag = "⭐ " if is_sub else ""
+                            choices.append(
+                                app_commands.Choice(
+                                    name=f"{sub_tag}{name}{sp_tag}"[:100],
+                                    value=name[:100]
+                                )
+                            )
+                    return choices
 
         # Detect DLC intent before stripping trailing punctuation
         user_searching_dlc = any(char in clean_current for char in [":", "-", "–", "—"]) or \
                              any(k in clean_current.lower() for k in ["dlc", "expansion", "pack", "add-on"])
 
-        # Strip trailing punctuation/spaces (e.g., "abiotic factor:" -> "abiotic factor")
+        # Strip trailing punctuation/spaces
         search_term = re.sub(r'[:\-–—\s]+$', '', clean_current)
         if not search_term:
             search_term = clean_current
 
-        # Sanitize for IGDB API to prevent 400 Bad Request on colons/dashes
+        # Sanitize for IGDB API
         igdb_search_query = re.sub(r'[:\-–—]', ' ', search_term).strip()
         igdb_search_query = re.sub(r'\s+', ' ', igdb_search_query)
 
@@ -216,7 +253,6 @@ async def autocomplete_games(_interaction: discord.Interaction, current: str):
                 ratio = difflib.SequenceMatcher(None, q_low, t_low).ratio()
                 return 2, ratio  # Prefix Match
 
-            # FIX: Treat substring/word containment as Tier 2 so it bypasses the 0.60 fuzzy cutoff
             if q_low in t_low:
                 ratio = difflib.SequenceMatcher(None, q_low, t_low).ratio()
                 return 2, ratio  # Substring Match
@@ -224,86 +260,84 @@ async def autocomplete_games(_interaction: discord.Interaction, current: str):
             ratio = difflib.SequenceMatcher(None, q_low, t_low).ratio()
             return 3, ratio  # Fuzzy Match
 
-        def get_sort_score(inner_match_tier: int, inner_is_mp: int) -> int:
-            """
-            This guarantees:
-            1. Multiplayer Exact/Sequels (Portal 2)
-            2. Singleplayer Exact/Sequels (Portal 1, Slay the Spire)
-            3. Multiplayer Prefix/Fuzzy (Portal Knights)
-            ...ensuring single-player exact matches NEVER get buried by irrelevant multiplayer games.
-            """
-            if inner_match_tier == 0 and inner_is_mp == 1: return 0  # MP Exact
-            if inner_match_tier == 1 and inner_is_mp == 1: return 1  # MP Sequel
-            if inner_match_tier == 0 and inner_is_mp == 0: return 2  # SP Exact
-            if inner_match_tier == 1 and inner_is_mp == 0: return 3  # SP Sequel
-            if inner_match_tier == 2 and inner_is_mp == 1: return 4  # MP Prefix
-            if inner_match_tier == 2 and inner_is_mp == 0: return 5  # SP Prefix
-            if inner_match_tier == 3 and inner_is_mp == 1: return 6  # MP Fuzzy
-            return 7                                     # SP Fuzzy
+        def get_sort_score(inner_match_tier: int, inner_is_mp: int, inner_is_sub: int) -> int:
+            base_score = 7
+            if inner_match_tier == 0 and inner_is_mp == 1: base_score = 0     # MP Exact
+            elif inner_match_tier == 1 and inner_is_mp == 1: base_score = 1   # MP Sequel
+            elif inner_match_tier == 0 and inner_is_mp == 0: base_score = 2   # SP Exact
+            elif inner_match_tier == 1 and inner_is_mp == 0: base_score = 3   # SP Sequel
+            elif inner_match_tier == 2 and inner_is_mp == 1: base_score = 4   # MP Prefix
+            elif inner_match_tier == 2 and inner_is_mp == 0: base_score = 5   # SP Prefix
+            elif inner_match_tier == 3 and inner_is_mp == 1: base_score = 6   # MP Fuzzy
+
+            # Only shift score to top when boost_subscribed is True (/ping_game)
+            return base_score - (10 if (boost_subscribed and inner_is_sub) else 0)
 
         def should_keep_candidate(inner_name: str, inner_rating_cnt: int, inner_match_tier: int, inner_similarity: float) -> bool:
             name_low = inner_name.lower()
-
-            # Filter unwanted keywords unless user searched for them explicitly
             if not user_wants_noise and any(k in name_low for k in NOISE_KEYWORDS):
                 return False
-
-            # Drop weak fuzzy matches
             if inner_match_tier == 3 and inner_similarity < 0.60:
                 return False
-
-            # Drop unrated shovelware/fan projects unless it's a direct prefix/exact match
             if (not inner_rating_cnt or inner_rating_cnt == 0) and inner_match_tier == 3:
                 return False
-
             return True
 
         # 2. LOCAL SEARCH
         async with aiosqlite.connect(DB_PATH) as db:
             if user_searching_dlc:
                 query_t1 = """
-                           SELECT name, is_multiplayer, total_rating_count FROM igdb_games
-                           WHERE (name LIKE ? OR name LIKE ?)
-                           ORDER BY is_multiplayer DESC, total_rating_count DESC
-                               LIMIT 35
+                           SELECT g.name, g.is_multiplayer, g.total_rating_count,
+                                  CASE WHEN s.user_id IS NOT NULL THEN 1 ELSE 0 END as is_sub
+                           FROM igdb_games g
+                                    LEFT JOIN subscriptions s ON g.id = s.game_id AND s.user_id = ?
+                           WHERE (g.name LIKE ? OR g.name LIKE ?)
+                           ORDER BY g.is_multiplayer DESC, g.total_rating_count DESC
+                           LIMIT 35 \
                            """
-                params_t1 = (f"{search_term}%", f"%{search_term}%")
+                params_t1 = (user_id, f"{search_term}%", f"%{search_term}%")
             else:
                 query_t1 = """
-                           SELECT name, is_multiplayer, total_rating_count FROM igdb_games
-                           WHERE (category IN (0, 8, 9, 10, 11) OR category IS NULL)
-                             AND (parent_game_id IS NULL OR parent_game_id = 0)
-                             AND (version_parent_id IS NULL OR version_parent_id = 0)
-                             AND (name LIKE ? OR name LIKE ?)
-                           ORDER BY is_multiplayer DESC, total_rating_count DESC
-                               LIMIT 35 \
+                           SELECT g.name, g.is_multiplayer, g.total_rating_count,
+                                  CASE WHEN s.user_id IS NOT NULL THEN 1 ELSE 0 END as is_sub
+                           FROM igdb_games g
+                                    LEFT JOIN subscriptions s ON g.id = s.game_id AND s.user_id = ?
+                           WHERE (g.category IN (0, 8, 9, 10, 11) OR g.category IS NULL)
+                             AND (g.parent_game_id IS NULL OR g.parent_game_id = 0)
+                             AND (g.version_parent_id IS NULL OR g.version_parent_id = 0)
+                             AND (g.name LIKE ? OR g.name LIKE ?)
+                           ORDER BY g.is_multiplayer DESC, g.total_rating_count DESC
+                           LIMIT 35 \
                            """
-                params_t1 = (f"{search_term}%", f"%{search_term}%")
+                params_t1 = (user_id, f"{search_term}%", f"%{search_term}%")
 
             async with db.execute(query_t1, params_t1) as cursor:
                 rows_t1 = await cursor.fetchall()
-                for name, is_mp, rating_cnt in rows_t1:
+                for name, is_mp, rating_cnt, is_sub in rows_t1:
                     if (user_searching_dlc or not GENERIC_DLC_PATTERN.search(name)) and name.lower() not in seen_names:
                         match_tier, similarity = compute_match_score(name, search_term)
                         if should_keep_candidate(name, rating_cnt, match_tier, similarity):
-                            sort_score = get_sort_score(match_tier, is_mp)
-                            choice_candidates.append((sort_score, -similarity, -(rating_cnt or 0), name, is_mp))
+                            sort_score = get_sort_score(match_tier, is_mp, is_sub)
+                            choice_candidates.append((sort_score, -similarity, -(rating_cnt or 0), name, is_mp, is_sub))
                             seen_names.add(name.lower())
 
             # 2b. EXPLICIT DB FETCH FOR EXACT MATCH
             if search_term.lower() not in seen_names:
                 query_exact = """
-                              SELECT name, is_multiplayer, total_rating_count FROM igdb_games
-                              WHERE name = ? COLLATE NOCASE
-                                  LIMIT 1
+                              SELECT g.name, g.is_multiplayer, g.total_rating_count,
+                                     CASE WHEN s.user_id IS NOT NULL THEN 1 ELSE 0 END as is_sub
+                              FROM igdb_games g
+                                       LEFT JOIN subscriptions s ON g.id = s.game_id AND s.user_id = ?
+                              WHERE g.name = ? COLLATE NOCASE
+                              LIMIT 1 \
                               """
-                async with db.execute(query_exact, (search_term,)) as cursor:
+                async with db.execute(query_exact, (user_id, search_term)) as cursor:
                     exact_row = await cursor.fetchone()
                     if exact_row:
-                        name, is_mp, rating_cnt = exact_row
+                        name, is_mp, rating_cnt, is_sub = exact_row
                         match_tier, similarity = compute_match_score(name, search_term)
-                        sort_score = get_sort_score(match_tier, is_mp)
-                        choice_candidates.append((sort_score, -similarity, -(rating_cnt or 0), name, is_mp))
+                        sort_score = get_sort_score(match_tier, is_mp, is_sub)
+                        choice_candidates.append((sort_score, -similarity, -(rating_cnt or 0), name, is_mp, is_sub))
                         seen_names.add(name.lower())
 
         # 3. LIVE IGDB SEARCH
@@ -351,8 +385,8 @@ async def autocomplete_games(_interaction: discord.Interaction, current: str):
                                     if user_searching_dlc or not GENERIC_DLC_PATTERN.search(g_name):
                                         match_tier, similarity = compute_match_score(g_name, search_term)
                                         if should_keep_candidate(g_name, r_cnt, match_tier, similarity):
-                                            sort_score = get_sort_score(match_tier, is_mp)
-                                            choice_candidates.append((sort_score, -similarity, -(r_cnt or 0), g_name, is_mp))
+                                            sort_score = get_sort_score(match_tier, is_mp, 0)
+                                            choice_candidates.append((sort_score, -similarity, -(r_cnt or 0), g_name, is_mp, 0))
                                             seen_names.add(g_name.lower())
                 except Exception as e:
                     print(f"IGDB Autocomplete Exception: {e}")
@@ -365,11 +399,13 @@ async def autocomplete_games(_interaction: discord.Interaction, current: str):
         for item in choice_candidates[:25]:
             g_name = item[3]
             is_mp = item[4]
+            is_sub = item[5]
 
-            # Add visual indicator ONLY if single-player
-            display_name = f"{g_name} [SP 👤]" if is_mp == 0 else g_name
+            sp_tag = " [SP 👤]" if is_mp == 0 else ""
+            sub_tag = "⭐ " if is_sub else ""
 
-            # name = what appears in the dropdown, value = raw title sent to command
+            display_name = f"{sub_tag}{g_name}{sp_tag}"
+
             choices.append(app_commands.Choice(name=display_name[:100], value=g_name[:100]))
 
         return choices
@@ -427,5 +463,38 @@ class ConfirmDataDeletionView(discord.ui.View):
         self.stop()
         await interaction.response.edit_message(
             content="Action canceled. Your data gets to live another day.",
+            view=None
+        )
+
+
+# noinspection PyTypeChecker
+class ConfirmResetTemplateView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=30.0)
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("You cannot use these buttons.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Reset Template", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM user_settings WHERE user_id = ?", (interaction.user.id,))
+            await db.commit()
+
+        self.stop()
+        await interaction.response.edit_message(
+            content="✅ Your ping template has been reset to the default format!",
+            view=None
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(
+            content="Action canceled. Your custom ping template was preserved.",
             view=None
         )

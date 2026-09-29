@@ -10,7 +10,7 @@ from utils import (
     resolve_to_base_game,
     autocomplete_games,
     fetch_and_cache_game_from_igdb,
-    ConfirmDataDeletionView, fetch_game_details_from_igdb
+    ConfirmDataDeletionView, fetch_game_details_from_igdb, ConfirmResetTemplateView
 )
 
 
@@ -192,15 +192,17 @@ class UserCommands(commands.Cog):
 
             game_id, official_name = await resolve_to_base_game(row[0], row[1])
 
-            async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
+            # Fetch subscribers, excluding the user executing the command
+            async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ? AND user_id != ?", (game_id, interaction.user.id)) as cursor:
                 users = await cursor.fetchall()
 
             # Retrieve user custom template if saved
             async with db.execute("SELECT ping_template FROM user_settings WHERE user_id = ?", (interaction.user.id,)) as cursor:
                 template_row = await cursor.fetchone()
 
+        # Handle case where no other users are subscribed
         if not users:
-            await interaction.followup.send(f"No subscribers for **{official_name}**.")
+            await interaction.followup.send(f"No other subscribers to ping for **{official_name}**.")
             return
 
         mentions = " ".join(f"<@{u[0]}>" for u in users)
@@ -257,12 +259,16 @@ class UserCommands(commands.Cog):
             )
             await db.commit()
 
+        # Dummy mentions for template preview
+        mock_caller = interaction.user.mention
+        mock_mentions = "<@123456789012345678>"
+
         preview = (
-            final_template
-            .replace("{caller}", interaction.user.mention)
+            template
+            .replace("{caller}", mock_caller)
             .replace("{user}", interaction.user.mention)
-            .replace("{game}", "**Helldivers 2**")
-            .replace("{mentions}", interaction.user.mention)
+            .replace("{game}", "**Wardogs**")
+            .replace("{mentions}", mock_mentions)
             .replace("{note}", "Looking for 2 more!")
         )
 
@@ -287,12 +293,16 @@ class UserCommands(commands.Cog):
             return
 
         template = row[0]
+
+        # Dummy mentions for template preview
+        mock_caller = interaction.user.mention
+        mock_mentions = "<@123456789012345678>"
         preview = (
             template
-            .replace("{caller}", interaction.user.mention)
+            .replace("{caller}", mock_caller)
             .replace("{user}", interaction.user.mention)
-            .replace("{game}", "**Helldivers 2**")
-            .replace("{mentions}", interaction.user.mention)
+            .replace("{game}", "**Wardogs**")
+            .replace("{mentions}", mock_mentions)
             .replace("{note}", "Looking for 2 more!")
         )
 
@@ -305,10 +315,22 @@ class UserCommands(commands.Cog):
     @app_commands.command(name="reset_ping_template", description="Reset your ping template back to default")
     async def reset_ping_template(self, interaction: discord.Interaction):
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("DELETE FROM user_settings WHERE user_id = ?", (interaction.user.id,))
-            await db.commit()
+            async with db.execute("SELECT ping_template FROM user_settings WHERE user_id = ?", (interaction.user.id,)) as cursor:
+                row = await cursor.fetchone()
 
-        await interaction.response.send_message("✅ Your ping template has been reset to the default format!", ephemeral=True)
+        if not row or not row[0]:
+            await interaction.response.send_message(
+                "You are already using the default ping template.",
+                ephemeral=True
+            )
+            return
+
+        view = ConfirmResetTemplateView(author_id=interaction.user.id)
+        await interaction.response.send_message(
+            "Are you **sure** you want to reset your custom ping template back to default?",
+            view=view,
+            ephemeral=True
+        )
 
     @app_commands.command(name="user_subscriptions", description="View subscriptions for yourself or another user.")
     async def user_subscriptions(self, interaction: discord.Interaction, user: discord.User = None, public: bool = False):

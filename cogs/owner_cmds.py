@@ -7,7 +7,8 @@ from utils import (
     resolve_to_base_game,
     fetch_and_cache_game_from_igdb,
     ConfirmDataDeletionView,
-    get_bot_owner_id
+    get_bot_owner_id,
+    autocomplete_games
 )
 
 def is_bot_owner():
@@ -120,6 +121,7 @@ class OwnerCommands(commands.Cog):
             await ctx.send(f"❌ HTTP Error: `{e}`", delete_after=5)
 
     @owner_group.command(name="subscribe_user", description="Force-subscribe a user to a game")
+    @app_commands.autocomplete(game=autocomplete_games)  # <--- Added decorator here
     @is_bot_owner()
     async def admin_subscribe(self, interaction: discord.Interaction, user: discord.User, game: str):
         await interaction.response.defer(ephemeral=True)
