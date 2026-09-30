@@ -561,6 +561,49 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
     except (discord.NotFound, discord.HTTPException):
         return []
 
+async def autocomplete_text_channels(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    if not interaction.guild:
+        return []
+
+    clean_current = current.strip().lower().lstrip("#")
+
+    # Filter to text channels in the server matching search term
+    matching_channels = [
+        ch for ch in interaction.guild.text_channels
+        if clean_current in ch.name.lower() or clean_current in str(ch.id)
+    ]
+
+    # Return up to 25 choices (Discord autocomplete limit)
+    return [
+        app_commands.Choice(
+            name=f"#{ch.name}"[:100],
+            value=str(ch.id)
+        )
+        for ch in matching_channels[:25]
+    ]
+
+async def is_lfg_allowed_in_channel(guild_id: int, channel_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+                "SELECT mode, whitelisted_channels FROM guild_lfg_settings WHERE guild_id = ?",
+                (guild_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+    if not row:
+        return True  # Default: allowed everywhere
+
+    mode, raw_whitelisted = row
+    if mode == "all":
+        return True
+    if mode == "none":
+        return False
+    if mode == "whitelist":
+        allowed_ids = set(raw_whitelisted.split(",")) if raw_whitelisted else set()
+        return str(channel_id) in allowed_ids
+
+    return True
+
 def format_interval(hours: float) -> str:
     """Helper to cleanly format update intervals into minutes or hours."""
     if hours < 1:
