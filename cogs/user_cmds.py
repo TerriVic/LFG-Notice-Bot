@@ -110,8 +110,7 @@ class UserCommands(commands.Cog):
 
         # If game wasn't found in local multiplayer cache, fetch and store it from IGDB live
         if not raw_id:
-            user_searching_dlc = any(char in clean_game for char in [":", "-", "–", "—"])
-            result = await fetch_and_cache_game_from_igdb(clean_game, allow_dlc=user_searching_dlc)
+            result = await fetch_and_cache_game_from_igdb(clean_game)
             if not result:
                 await interaction.followup.send(
                     f"Could not find **{clean_game}** in local cache or on IGDB.",
@@ -388,8 +387,7 @@ class UserCommands(commands.Cog):
 
         # If game wasn't found in local multiplayer cache, fetch and store it from IGDB live
         if not raw_id:
-            user_searching_dlc = any(char in clean_game for char in [":", "-", "–", "—"])
-            result = await fetch_and_cache_game_from_igdb(clean_game, allow_dlc=user_searching_dlc)
+            result = await fetch_and_cache_game_from_igdb(clean_game)
             if not result:
                 await interaction.followup.send(
                     f"Could not find **{clean_game}** in local cache or on IGDB.",
