@@ -11,7 +11,7 @@ from utils import (
     autocomplete_games,
     fetch_and_cache_game_from_igdb,
     fetch_game_details_from_igdb,
-    GenericConfirmationView
+    GenericConfirmationView, is_lfg_allowed_in_channel
 )
 
 
@@ -178,11 +178,22 @@ class UserCommands(commands.Cog):
     @app_commands.checks.cooldown(1, 30.0)
     @app_commands.autocomplete(game=autocomplete_games)
     async def ping_game(self, interaction: discord.Interaction, game: str, note: str = None):
+        # 1. Check channel permissions using the helper function
+        if interaction.guild_id:
+            allowed = await is_lfg_allowed_in_channel(interaction.guild_id, interaction.channel_id)
+            if not allowed:
+                await interaction.response.send_message(
+                    "❌ LFG pings are not allowed in this channel.",
+                    ephemeral=True
+                )
+                return
+
         await interaction.response.defer()
 
         clean_game = game.strip().replace("’", "'").replace("‘", "'")
 
         async with aiosqlite.connect(DB_PATH) as db:
+            # Lookup game ID
             async with db.execute("SELECT id, name FROM igdb_games WHERE name = ? COLLATE NOCASE", (clean_game,)) as cursor:
                 row = await cursor.fetchone()
 
@@ -192,17 +203,22 @@ class UserCommands(commands.Cog):
 
             game_id, official_name = await resolve_to_base_game(row[0], row[1])
 
-            # Fetch subscribers, excluding the user executing the command
-            async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ? AND user_id != ?", (game_id, interaction.user.id)) as cursor:
+            # Query subscribers excluding the user invoking the command
+            async with db.execute(
+                "SELECT user_id FROM subscriptions WHERE game_id = ? AND user_id != ?",
+                (game_id, interaction.user.id)
+            ) as cursor:
                 users = await cursor.fetchall()
 
             # Retrieve user custom template if saved
-            async with db.execute("SELECT ping_template FROM user_settings WHERE user_id = ?", (interaction.user.id,)) as cursor:
+            async with db.execute(
+                "SELECT ping_template FROM user_settings WHERE user_id = ?",
+                (interaction.user.id,)
+            ) as cursor:
                 template_row = await cursor.fetchone()
 
-        # Handle case where no other users are subscribed
         if not users:
-            await interaction.followup.send(f"No other subscribers to ping for **{official_name}**.")
+            await interaction.followup.send(f"No subscribers for **{official_name}**.")
             return
 
         mentions = " ".join(f"<@{u[0]}>" for u in users)
@@ -221,14 +237,11 @@ class UserCommands(commands.Cog):
                 .replace("{mentions}", mentions)
                 .replace("{note}", clean_note)
             )
-            # Safeguard: Append note if present but omitted from template
             if clean_note and clean_note not in msg:
                 msg += f"\n> {clean_note}"
-            # Safeguard: Append mentions if omitted from template
             if mentions not in msg:
                 msg += f"\n{mentions}"
         else:
-            # Default format: "<caller> wants to play <game>! <mentions>"
             msg = f"{caller_mention} wants to play {formatted_game}! {mentions}"
             if clean_note:
                 msg += f"\n> {clean_note}"
@@ -672,6 +685,7 @@ class UserCommands(commands.Cog):
                     f"• {fmt('config', 'edit_top_games')} `<message> [limit] [interval]` — Edit tracker settings or force a refresh if options are left empty.\n"
                     f"• {fmt('config', 'force_update_top_games')} `<message>` — Force an immediate refresh on a live tracker.\n"
                     f"• {fmt('config', 'remove_top_games')} `<message>` — Stop tracking and delete an active live top games message.\n"
+                    f"• {fmt('config', 'set_lfg_channels')} `<mode> [channels]` — Set channel restrictions for LFG pings.\n"
                     f"• {fmt('config', 'server_overview')} — View subscription details for members in this server."
                 ),
                 inline=False

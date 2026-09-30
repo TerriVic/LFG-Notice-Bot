@@ -98,6 +98,14 @@ async def init_db():
         if "sub_indicator" not in columns:
             await db.execute("ALTER TABLE user_settings ADD COLUMN sub_indicator TEXT DEFAULT '⭐';")
 
+        await db.execute("""
+                         CREATE TABLE IF NOT EXISTS guild_lfg_settings (
+                                                                           guild_id INTEGER PRIMARY KEY,
+                                                                           mode TEXT NOT NULL DEFAULT 'all',
+                                                                           whitelisted_channels TEXT DEFAULT ''
+                         );
+                         """)
+
         await db.commit()
 
     print("[DB Setup] Schema checked and migrated safely.")
