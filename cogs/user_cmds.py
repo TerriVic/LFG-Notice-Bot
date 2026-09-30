@@ -530,6 +530,73 @@ class UserCommands(commands.Cog):
 
         await interaction.followup.send(embed=embed, ephemeral=not public)
 
+    @app_commands.command(name="set_subscribed_indicator", description="Set a custom icon/indicator for your subscribed games in autocomplete")
+    @app_commands.describe(indicator="Custom icon, emoji, or text (e.g. 🔥, [SUB], ⭐). Max 10 chars.")
+    async def set_subscribed_indicator(self, interaction: discord.Interaction, indicator: str):
+        clean_indicator = indicator.strip()
+        if len(clean_indicator) > 10:
+            await interaction.response.send_message("Indicator is too long! Keep it under 10 characters.", ephemeral=True)
+            return
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """
+                INSERT INTO user_settings (user_id, sub_indicator)
+                VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET sub_indicator = excluded.sub_indicator
+                """,
+                (interaction.user.id, clean_indicator)
+            )
+            await db.commit()
+
+        await interaction.response.send_message(
+            f"✅ **Subscribed game indicator updated!**\n\n"
+            f"Subscribed games in autocomplete will now show: `{clean_indicator} Game Title`",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="view_subscribed_indicator", description="View your current custom subscribed game indicator")
+    async def view_subscribed_indicator(self, interaction: discord.Interaction):
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT sub_indicator FROM user_settings WHERE user_id = ?", (interaction.user.id,)) as cursor:
+                row = await cursor.fetchone()
+
+        indicator = row[0] if (row and row[0]) else "⭐"
+
+        await interaction.response.send_message(
+            f"Your current subscribed game indicator is: `{indicator}`\n"
+            f"**Preview in search:** `{indicator} Helldivers 2`",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="reset_subscribed_indicator", description="Reset your subscribed game indicator back to star (⭐)")
+    async def reset_subscribed_indicator(self, interaction: discord.Interaction):
+        async def do_reset(_inter: discord.Interaction):
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    """
+                    INSERT INTO user_settings (user_id, sub_indicator)
+                    VALUES (?, '⭐')
+                    ON CONFLICT(user_id) DO UPDATE SET sub_indicator = '⭐'
+                    """,
+                    (interaction.user.id,)
+                )
+                await db.commit()
+
+        view = GenericConfirmationView(
+            author_id=interaction.user.id,
+            confirm_label="Reset Indicator",
+            confirm_message="✅ Your subscribed indicator has been reset to `⭐`!",
+            cancel_message="Action canceled. Your indicator setting was preserved.",
+            on_confirm=do_reset
+        )
+
+        await interaction.response.send_message(
+            "Are you sure you want to reset your subscribed game indicator back to default (`⭐`)?",
+            view=view,
+            ephemeral=True
+        )
+
     @app_commands.command(name="help", description="Show information about available bot commands")
     @app_commands.describe(
         public="Set to True to share publicly (default: False)"
@@ -570,6 +637,9 @@ class UserCommands(commands.Cog):
                 f"• {fmt('set_ping_template')} `<template>` — Set custom ping format.\n"
                 f"• {fmt('view_ping_template')} — View your saved ping format.\n"
                 f"• {fmt('reset_ping_template')} — Reset ping format to default.\n"
+                f"• {fmt('set_subscribed_indicator')} `<indicator>` — Set custom autocomplete icon for subscribed games.\n"
+                f"• {fmt('view_subscribed_indicator')} — View your current subscribed game indicator.\n"
+                f"• {fmt('reset_subscribed_indicator')} — Reset subscribed game indicator to default (`⭐`).\n"
                 f"• {fmt('top_games')} `[limit]` `[public]` — View popular server games.\n"
                 f"• {fmt('show_subscribers')} `<game>` — List subscribers for specified game."
             ),
@@ -585,12 +655,12 @@ class UserCommands(commands.Cog):
         embed.add_field(
             name="Data & Privacy",
             value=(
-                f"• {fmt('delete_all_my_data')} — Delete all subscriptions and settings (e.g., ping templates)."
+                f"• {fmt('delete_all_my_data')} — Delete all subscriptions and settings (e.g., ping templates, custom indicators)."
             ),
             inline=False
         )
 
-                # Conditionally display admin section if user has Administrator permissions
+        # Conditionally display admin section if user has Administrator permissions
         is_admin = interaction.permissions and interaction.permissions.administrator
         if is_admin:
             # Visual separator line (only appears for admins/owners)
@@ -601,7 +671,7 @@ class UserCommands(commands.Cog):
                     f"• {fmt('config', 'setup_top_games')} `[limit] [interval]` — Post a live-updating top games message (interval in hours, e.g., 0.25 for 15m).\n"
                     f"• {fmt('config', 'edit_top_games')} `<message> [limit] [interval]` — Edit tracker settings or force a refresh if options are left empty.\n"
                     f"• {fmt('config', 'force_update_top_games')} `<message>` — Force an immediate refresh on a live tracker.\n"
-                    f"• {fmt('config', 'remove_top_games')} `<message>` — Stop tracking and delete an active live top games message."
+                    f"• {fmt('config', 'remove_top_games')} `<message>` — Stop tracking and delete an active live top games message.\n"
                     f"• {fmt('config', 'server_overview')} — View subscription details for members in this server."
                 ),
                 inline=False
@@ -609,7 +679,7 @@ class UserCommands(commands.Cog):
 
         embed.set_footer(text="Looking for a missing game or DLC? Type its full name in /subscribe!")
 
-        await interaction.response.send_message(embed=embed, ephemeral= not public)
+        await interaction.response.send_message(embed=embed, ephemeral=not public)
 
 async def setup(bot):
     await bot.add_cog(UserCommands(bot))

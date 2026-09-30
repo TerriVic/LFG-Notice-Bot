@@ -196,6 +196,14 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
             interaction.command and interaction.command.name == "ping_game"
         )
 
+        # Retrieve user custom subscribed indicator preference
+        sub_icon = "⭐ "
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT sub_indicator FROM user_settings WHERE user_id = ?", (user_id,)) as cursor:
+                row = await cursor.fetchone()
+                if row and row[0]:
+                    sub_icon = f"{row[0]} "
+
         # 1. Default empty input handling
         if not clean_current:
             async with aiosqlite.connect(DB_PATH) as db:
@@ -278,7 +286,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                         has_delimiter = any(c in name for c in [":", " - ", " – ", " — "])
                         if is_sub or (not GENERIC_DLC_PATTERN.search(name) and not has_delimiter):
                             sp_tag = " [SP 👤]" if is_mp == 0 else ""
-                            sub_tag = "⭐ " if is_sub else ""
+                            sub_tag = sub_icon if is_sub else ""
                             choices.append(
                                 app_commands.Choice(
                                     name=f"{sub_tag}{name}{sp_tag}"[:100],
@@ -542,7 +550,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
             is_sub = item[6]
 
             sp_tag = " [SP 👤]" if is_mp == 0 else ""
-            sub_tag = "⭐ " if is_sub else ""
+            sub_tag = sub_icon if is_sub else ""
 
             display_name = f"{sub_tag}{g_name}{sp_tag}"
 
