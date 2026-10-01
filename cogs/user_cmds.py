@@ -11,7 +11,7 @@ from utils import (
     autocomplete_games,
     fetch_and_cache_game_from_igdb,
     fetch_game_details_from_igdb,
-    GenericConfirmationView
+    GenericConfirmationView, is_lfg_allowed_in_channel
 )
 
 
@@ -110,8 +110,7 @@ class UserCommands(commands.Cog):
 
         # If game wasn't found in local multiplayer cache, fetch and store it from IGDB live
         if not raw_id:
-            user_searching_dlc = any(char in clean_game for char in [":", "-", "–", "—"])
-            result = await fetch_and_cache_game_from_igdb(clean_game, allow_dlc=user_searching_dlc)
+            result = await fetch_and_cache_game_from_igdb(clean_game)
             if not result:
                 await interaction.followup.send(
                     f"Could not find **{clean_game}** in local cache or on IGDB.",
@@ -179,11 +178,22 @@ class UserCommands(commands.Cog):
     @app_commands.checks.cooldown(1, 30.0)
     @app_commands.autocomplete(game=autocomplete_games)
     async def ping_game(self, interaction: discord.Interaction, game: str, note: str = None):
+        # 1. Check channel permissions using the helper function
+        if interaction.guild_id:
+            allowed = await is_lfg_allowed_in_channel(interaction.guild_id, interaction.channel_id)
+            if not allowed:
+                await interaction.response.send_message(
+                    "❌ LFG pings are not allowed in this channel.",
+                    ephemeral=True
+                )
+                return
+
         await interaction.response.defer()
 
         clean_game = game.strip().replace("’", "'").replace("‘", "'")
 
         async with aiosqlite.connect(DB_PATH) as db:
+            # Lookup game ID
             async with db.execute("SELECT id, name FROM igdb_games WHERE name = ? COLLATE NOCASE", (clean_game,)) as cursor:
                 row = await cursor.fetchone()
 
@@ -193,17 +203,22 @@ class UserCommands(commands.Cog):
 
             game_id, official_name = await resolve_to_base_game(row[0], row[1])
 
-            # Fetch subscribers, excluding the user executing the command
-            async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ? AND user_id != ?", (game_id, interaction.user.id)) as cursor:
+            # Query subscribers excluding the user invoking the command
+            async with db.execute(
+                "SELECT user_id FROM subscriptions WHERE game_id = ? AND user_id != ?",
+                (game_id, interaction.user.id)
+            ) as cursor:
                 users = await cursor.fetchall()
 
             # Retrieve user custom template if saved
-            async with db.execute("SELECT ping_template FROM user_settings WHERE user_id = ?", (interaction.user.id,)) as cursor:
+            async with db.execute(
+                "SELECT ping_template FROM user_settings WHERE user_id = ?",
+                (interaction.user.id,)
+            ) as cursor:
                 template_row = await cursor.fetchone()
 
-        # Handle case where no other users are subscribed
         if not users:
-            await interaction.followup.send(f"No other subscribers to ping for **{official_name}**.")
+            await interaction.followup.send(f"No subscribers for **{official_name}**.")
             return
 
         mentions = " ".join(f"<@{u[0]}>" for u in users)
@@ -222,14 +237,11 @@ class UserCommands(commands.Cog):
                 .replace("{mentions}", mentions)
                 .replace("{note}", clean_note)
             )
-            # Safeguard: Append note if present but omitted from template
             if clean_note and clean_note not in msg:
                 msg += f"\n> {clean_note}"
-            # Safeguard: Append mentions if omitted from template
             if mentions not in msg:
                 msg += f"\n{mentions}"
         else:
-            # Default format: "<caller> wants to play <game>! <mentions>"
             msg = f"{caller_mention} wants to play {formatted_game}! {mentions}"
             if clean_note:
                 msg += f"\n> {clean_note}"
@@ -388,8 +400,7 @@ class UserCommands(commands.Cog):
 
         # If game wasn't found in local multiplayer cache, fetch and store it from IGDB live
         if not raw_id:
-            user_searching_dlc = any(char in clean_game for char in [":", "-", "–", "—"])
-            result = await fetch_and_cache_game_from_igdb(clean_game, allow_dlc=user_searching_dlc)
+            result = await fetch_and_cache_game_from_igdb(clean_game)
             if not result:
                 await interaction.followup.send(
                     f"Could not find **{clean_game}** in local cache or on IGDB.",
@@ -532,6 +543,73 @@ class UserCommands(commands.Cog):
 
         await interaction.followup.send(embed=embed, ephemeral=not public)
 
+    @app_commands.command(name="set_subscribed_indicator", description="Set a custom icon/indicator for your subscribed games in autocomplete")
+    @app_commands.describe(indicator="Custom icon, emoji, or text (e.g. 🔥, [SUB], ⭐). Max 10 chars.")
+    async def set_subscribed_indicator(self, interaction: discord.Interaction, indicator: str):
+        clean_indicator = indicator.strip()
+        if len(clean_indicator) > 10:
+            await interaction.response.send_message("Indicator is too long! Keep it under 10 characters.", ephemeral=True)
+            return
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """
+                INSERT INTO user_settings (user_id, sub_indicator)
+                VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET sub_indicator = excluded.sub_indicator
+                """,
+                (interaction.user.id, clean_indicator)
+            )
+            await db.commit()
+
+        await interaction.response.send_message(
+            f"✅ **Subscribed game indicator updated!**\n\n"
+            f"Subscribed games in autocomplete will now show: `{clean_indicator} Game Title`",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="view_subscribed_indicator", description="View your current custom subscribed game indicator")
+    async def view_subscribed_indicator(self, interaction: discord.Interaction):
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT sub_indicator FROM user_settings WHERE user_id = ?", (interaction.user.id,)) as cursor:
+                row = await cursor.fetchone()
+
+        indicator = row[0] if (row and row[0]) else "⭐"
+
+        await interaction.response.send_message(
+            f"Your current subscribed game indicator is: `{indicator}`\n"
+            f"**Preview in search:** `{indicator} Helldivers 2`",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="reset_subscribed_indicator", description="Reset your subscribed game indicator back to star (⭐)")
+    async def reset_subscribed_indicator(self, interaction: discord.Interaction):
+        async def do_reset(_inter: discord.Interaction):
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    """
+                    INSERT INTO user_settings (user_id, sub_indicator)
+                    VALUES (?, '⭐')
+                    ON CONFLICT(user_id) DO UPDATE SET sub_indicator = '⭐'
+                    """,
+                    (interaction.user.id,)
+                )
+                await db.commit()
+
+        view = GenericConfirmationView(
+            author_id=interaction.user.id,
+            confirm_label="Reset Indicator",
+            confirm_message="✅ Your subscribed indicator has been reset to `⭐`!",
+            cancel_message="Action canceled. Your indicator setting was preserved.",
+            on_confirm=do_reset
+        )
+
+        await interaction.response.send_message(
+            "Are you sure you want to reset your subscribed game indicator back to default (`⭐`)?",
+            view=view,
+            ephemeral=True
+        )
+
     @app_commands.command(name="help", description="Show information about available bot commands")
     @app_commands.describe(
         public="Set to True to share publicly (default: False)"
@@ -572,6 +650,9 @@ class UserCommands(commands.Cog):
                 f"• {fmt('set_ping_template')} `<template>` — Set custom ping format.\n"
                 f"• {fmt('view_ping_template')} — View your saved ping format.\n"
                 f"• {fmt('reset_ping_template')} — Reset ping format to default.\n"
+                f"• {fmt('set_subscribed_indicator')} `<indicator>` — Set custom autocomplete icon for subscribed games.\n"
+                f"• {fmt('view_subscribed_indicator')} — View your current subscribed game indicator.\n"
+                f"• {fmt('reset_subscribed_indicator')} — Reset subscribed game indicator to default (`⭐`).\n"
                 f"• {fmt('top_games')} `[limit]` `[public]` — View popular server games.\n"
                 f"• {fmt('show_subscribers')} `<game>` — List subscribers for specified game."
             ),
@@ -587,12 +668,12 @@ class UserCommands(commands.Cog):
         embed.add_field(
             name="Data & Privacy",
             value=(
-                f"• {fmt('delete_all_my_data')} — Delete all subscriptions and settings (e.g., ping templates)."
+                f"• {fmt('delete_all_my_data')} — Delete all subscriptions and settings (e.g., ping templates, custom indicators)."
             ),
             inline=False
         )
 
-                # Conditionally display admin section if user has Administrator permissions
+        # Conditionally display admin section if user has Administrator permissions
         is_admin = interaction.permissions and interaction.permissions.administrator
         if is_admin:
             # Visual separator line (only appears for admins/owners)
@@ -603,7 +684,8 @@ class UserCommands(commands.Cog):
                     f"• {fmt('config', 'setup_top_games')} `[limit] [interval]` — Post a live-updating top games message (interval in hours, e.g., 0.25 for 15m).\n"
                     f"• {fmt('config', 'edit_top_games')} `<message> [limit] [interval]` — Edit tracker settings or force a refresh if options are left empty.\n"
                     f"• {fmt('config', 'force_update_top_games')} `<message>` — Force an immediate refresh on a live tracker.\n"
-                    f"• {fmt('config', 'remove_top_games')} `<message>` — Stop tracking and delete an active live top games message."
+                    f"• {fmt('config', 'remove_top_games')} `<message>` — Stop tracking and delete an active live top games message.\n"
+                    f"• {fmt('config', 'set_lfg_channels')} `<mode> [channels]` — Set channel restrictions for LFG pings.\n"
                     f"• {fmt('config', 'server_overview')} — View subscription details for members in this server."
                 ),
                 inline=False
@@ -611,7 +693,7 @@ class UserCommands(commands.Cog):
 
         embed.set_footer(text="Looking for a missing game or DLC? Type its full name in /subscribe!")
 
-        await interaction.response.send_message(embed=embed, ephemeral= not public)
+        await interaction.response.send_message(embed=embed, ephemeral=not public)
 
 async def setup(bot):
     await bot.add_cog(UserCommands(bot))

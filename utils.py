@@ -69,16 +69,20 @@ async def fetch_game_details_from_igdb(game_name: str) -> dict | None:
             data = await resp.json()
             return data[0] if data else None
 
-async def fetch_and_cache_game_from_igdb(game_name: str, allow_dlc: bool = False) -> tuple[int, str] | None:
+async def fetch_and_cache_game_from_igdb(game_name: str) -> tuple[int, str] | None:
     client_id = os.getenv("TWITCH_CLIENT_ID")
     access_token = os.getenv("TWITCH_ACCESS_TOKEN")
 
     if not client_id or not access_token:
         return None
 
-    headers = {"Client-ID": client_id, "Authorization": f"Bearer {access_token}"}
+    headers = {
+        "Client-ID": client_id,
+        "Authorization": f"Bearer {access_token}"
+    }
+
     clean_search = normalize_game_name(game_name)
-    body = f'fields id, name, category, first_release_date, version_parent, parent_game, game_modes, total_rating_count; search "{clean_search}"; limit 10;'
+    body = f'fields id, name, category, version_parent, parent_game; search "{clean_search}"; limit 10;'
 
     async with aiohttp.ClientSession() as session:
         async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
@@ -89,80 +93,92 @@ async def fetch_and_cache_game_from_igdb(game_name: str, allow_dlc: bool = False
     if not data:
         return None
 
-    # Find the first entry that is a true base game
     selected = None
+
+    # Priority 1: Exact case-insensitive title match
     for item in data:
-        p_game = extract_id(item.get("parent_game"))
-        v_parent = extract_id(item.get("version_parent"))
-        g_name = item.get("name", "")
-
-        # Ignore DLC items unless explicitly permitted by search
-        if not allow_dlc and GENERIC_DLC_PATTERN.search(g_name):
-            continue
-
-        if p_game is None and v_parent is None:
+        if item.get("name", "").lower() == game_name.lower():
             selected = item
             break
 
+    # Priority 2: Main Game (category 0)
+    if not selected:
+        for item in data:
+            if item.get("category", 0) == 0:
+                selected = item
+                break
+
+    # Fallback: First returned IGDB result
     if not selected:
         selected = data[0]
 
     game_id = selected["id"]
     official_name = selected["name"]
     category = selected.get("category", 0)
-    first_release_date = selected.get("first_release_date")
-    vp = extract_id(selected.get("version_parent"))
-    p_game = extract_id(selected.get("parent_game"))
-    rating_count = selected.get("total_rating_count", 0)
+    vp = selected.get("version_parent")
+    p_game = selected.get("parent_game")
 
-    # Check if IGDB game_modes contains any multiplayer mode (2=Multiplayer, 3=Co-op, 4=Split screen, 5=MMO, 6=Battle Royale)
-    modes = selected.get("game_modes", [])
-    raw_mode_ids = set()
-    for m in modes or []:
-        if isinstance(m, dict):
-            raw_mode_ids.add(m.get("id"))
-        elif isinstance(m, int):
-            raw_mode_ids.add(m)
+    version_parent_id = vp.get("id") if isinstance(vp, dict) else vp
+    parent_game_id = p_game.get("id") if isinstance(p_game, dict) else p_game
 
-    is_mp = 1 if raw_mode_ids.intersection({2, 3, 4, 5, 6}) else 0
-
-    # Save to SQLite with total_rating_count passed properly in the tuple
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            """
-            INSERT INTO igdb_games
-            (id, name, updated_at, first_release_date, category, parent_game_id, version_parent_id, is_multiplayer, total_rating_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                                       updated_at = excluded.updated_at,
-                                       first_release_date = excluded.first_release_date,
-                                       category = excluded.category,
-                                       parent_game_id = excluded.parent_game_id,
-                                       version_parent_id = excluded.version_parent_id,
-                                       is_multiplayer = excluded.is_multiplayer,
-                                       total_rating_count = excluded.total_rating_count
-            """,
-            (game_id, official_name, int(time.time()), first_release_date, category, p_game, vp, is_mp, rating_count)
+            """INSERT OR IGNORE INTO igdb_games
+                   (id, name, updated_at, category, parent_game_id, version_parent_id)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (game_id, official_name, int(time.time()), category, parent_game_id, version_parent_id)
         )
         await db.commit()
 
     return game_id, official_name
 
-async def resolve_to_base_game(game_id: int, official_name: str) -> tuple[int, str]:
-    """Recursively resolves special edition IDs to their true base game entry asynchronously."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT version_parent_id FROM igdb_games WHERE id = ?", (game_id,)) as cursor:
-            row = await cursor.fetchone()
+async def resolve_to_base_game(game_id: int, game_name: str):
+    """
+    Only resolve to parent game if the item is explicitly a DLC, expansion,
+    or standalone expansion (category in {1, 2}). Standalone/jam entries,
+    remasters, or version parents are preserved as-is.
+    """
+    client_id = os.getenv("TWITCH_CLIENT_ID")
+    access_token = os.getenv("TWITCH_ACCESS_TOKEN")
 
-        if row and row[0]:
-            parent_id = row[0]
-            async with db.execute("SELECT id, name FROM igdb_games WHERE id = ?", (parent_id,)) as cursor:
-                parent_row = await cursor.fetchone()
-            if parent_row:
-                return await resolve_to_base_game(parent_row[0], parent_row[1])
+    if not client_id or not access_token:
+        return game_id, game_name
 
-    return game_id, official_name
+    headers = {
+        "Client-ID": client_id,
+        "Authorization": f"Bearer {access_token}"
+    }
+
+    body = f'fields name, category, parent_game, version_parent; where id = {game_id};'
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data:
+                        item = data[0]
+                        category = item.get("category", 0)
+
+                        # Only follow parent_game if it is explicitly an Expansion (1) or DLC (2)
+                        if category in {1, 2}:
+                            parent = item.get("parent_game")
+                            if parent:
+                                p_id = parent.get("id") if isinstance(parent, dict) else parent
+                                # Recursively fetch parent
+                                p_body = f'fields id, name; where id = {p_id};'
+                                async with session.post("https://api.igdb.com/v4/games", headers=headers, data=p_body) as p_resp:
+                                    if p_resp.status == 200:
+                                        p_data = await p_resp.json()
+                                        if p_data:
+                                            return p_data[0]["id"], p_data[0]["name"]
+
+                        # Otherwise keep the exact game name/ID selected
+                        return game_id, item.get("name", game_name)
+    except Exception as e:
+        print(f"Error in resolve_to_base_game: {e}")
+
+    return game_id, game_name
 
 async def autocomplete_games(interaction: discord.Interaction, current: str):
     try:
@@ -179,6 +195,14 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
         boost_subscribed = bool(
             interaction.command and interaction.command.name == "ping_game"
         )
+
+        # Retrieve user custom subscribed indicator preference
+        sub_icon = "⭐ "
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT sub_indicator FROM user_settings WHERE user_id = ?", (user_id,)) as cursor:
+                row = await cursor.fetchone()
+                if row and row[0]:
+                    sub_icon = f"{row[0]} "
 
         # 1. Default empty input handling
         if not clean_current:
@@ -236,7 +260,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                                             ))
                                         GROUP BY g.id
                                         ORDER BY is_sub DESC, server_sub_count DESC, g.total_rating_count DESC, g.id
-                                        LIMIT 25 \
+                                        LIMIT 25
                                         """
                     else:
                         query_default = """
@@ -251,7 +275,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                                           AND (g.version_parent_id IS NULL OR g.version_parent_id = 0)
                                         GROUP BY g.id
                                         ORDER BY server_sub_count DESC, g.total_rating_count DESC, g.id
-                                        LIMIT 25 \
+                                        LIMIT 25
                                         """
                     params = (user_id,)
 
@@ -262,7 +286,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                         has_delimiter = any(c in name for c in [":", " - ", " – ", " — "])
                         if is_sub or (not GENERIC_DLC_PATTERN.search(name) and not has_delimiter):
                             sp_tag = " [SP 👤]" if is_mp == 0 else ""
-                            sub_tag = "⭐ " if is_sub else ""
+                            sub_tag = sub_icon if is_sub else ""
                             choices.append(
                                 app_commands.Choice(
                                     name=f"{sub_tag}{name}{sp_tag}"[:100],
@@ -286,6 +310,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
 
         choice_candidates = []
         seen_names = set()
+        user_subscribed_names = set()
 
         user_wants_noise = any(k in search_term.lower() for k in NOISE_KEYWORDS)
 
@@ -313,13 +338,13 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
 
         def get_sort_score(inner_match_tier: int, inner_is_mp: int, inner_is_sub: int) -> int:
             base_score = 7
-            if inner_match_tier == 0 and inner_is_mp == 1: base_score = 0     # MP Exact
-            elif inner_match_tier == 1 and inner_is_mp == 1: base_score = 1   # MP Sequel
-            elif inner_match_tier == 0 and inner_is_mp == 0: base_score = 2   # SP Exact
-            elif inner_match_tier == 1 and inner_is_mp == 0: base_score = 3   # SP Sequel
-            elif inner_match_tier == 2 and inner_is_mp == 1: base_score = 4   # MP Prefix
-            elif inner_match_tier == 2 and inner_is_mp == 0: base_score = 5   # SP Prefix
-            elif inner_match_tier == 3 and inner_is_mp == 1: base_score = 6   # MP Fuzzy
+            if inner_match_tier == 0 and inner_is_mp == 1: base_score = 0
+            elif inner_match_tier == 1 and inner_is_mp == 1: base_score = 1
+            elif inner_match_tier == 0 and inner_is_mp == 0: base_score = 2
+            elif inner_match_tier == 1 and inner_is_mp == 0: base_score = 3
+            elif inner_match_tier == 2 and inner_is_mp == 1: base_score = 4
+            elif inner_match_tier == 2 and inner_is_mp == 0: base_score = 5
+            elif inner_match_tier == 3 and inner_is_mp == 1: base_score = 6
 
             # Only shift score to top when boost_subscribed is True (/ping_game)
             return base_score - (10 if (boost_subscribed and inner_is_sub) else 0)
@@ -349,15 +374,26 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
             if inner_match_tier == 3 and inner_similarity < 0.60:
                 return False
 
-            # 5. Drop unrated shovelware/fan projects unless direct prefix/exact match
+            # Allow exact/prefix/sequel matches (tiers 0, 1, 2) even if unrated (0 rating count)
             if (not inner_rating_cnt or inner_rating_cnt == 0) and inner_match_tier == 3:
                 return False
 
             return True
 
-        # 2. LOCAL SEARCH & SERVER SUB COUNT PREFETCH
+        # 2. LOCAL SEARCH & USER SUBSCRIPTION PREFETCH
         async with aiosqlite.connect(DB_PATH) as db:
-            # Prefetch active subscription counts for members in the current server
+            # Fetch user's subscribed game names so live IGDB queries preserve subscription status
+            async with db.execute(
+                """
+                SELECT LOWER(g.name)
+                FROM subscriptions s
+                JOIN igdb_games g ON s.game_id = g.id
+                WHERE s.user_id = ?
+                """,
+                (user_id,)
+            ) as cursor:
+                user_subscribed_names = {row[0] for row in await cursor.fetchall()}
+
             server_sub_counts = {}
             if interaction.guild:
                 server_member_ids = [m.id for m in interaction.guild.members]
@@ -472,14 +508,11 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                                     cat = item.get("category", 0)
                                     modes = item.get("game_modes", [])
 
-                                    def get_id(val):
-                                        return val.get("id") if isinstance(val, dict) else val
 
-                                    p_game = get_id(item.get("parent_game"))
-                                    v_parent = get_id(item.get("version_parent"))
-
+                                    # Only filter out non-main categories if user isn't searching for DLCs
+                                    # We allow parent_game / version_parent for standalone indie games
                                     if not user_searching_dlc:
-                                        if cat not in {0, 8, 9, 10, 11} or p_game is not None or v_parent is not None:
+                                        if cat is not None and cat not in {0, 8, 9, 10, 11}:
                                             continue
 
                                     raw_mode_ids = set()
@@ -494,11 +527,14 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
                                     if g_name.lower() in seen_names:
                                         continue
 
+                                    # Check user's subscription status for live IGDB games
+                                    is_sub = 1 if g_name.lower() in user_subscribed_names else 0
+
                                     match_tier, similarity = compute_match_score(g_name, search_term)
-                                    if should_keep_candidate(g_name, r_cnt, match_tier, similarity):
-                                        sort_score = get_sort_score(match_tier, is_mp, 0)
+                                    if should_keep_candidate(g_name, r_cnt, match_tier, similarity, inner_is_sub=bool(is_sub)):
+                                        sort_score = get_sort_score(match_tier, is_mp, is_sub)
                                         sub_cnt = server_sub_counts.get(g_name.lower(), 0)
-                                        choice_candidates.append((sort_score, -similarity, -sub_cnt, -(r_cnt or 0), g_name, is_mp, 0))
+                                        choice_candidates.append((sort_score, -similarity, -sub_cnt, -(r_cnt or 0), g_name, is_mp, is_sub))
                                         seen_names.add(g_name.lower())
                 except Exception as e:
                     print(f"IGDB Autocomplete Exception: {e}")
@@ -514,7 +550,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
             is_sub = item[6]
 
             sp_tag = " [SP 👤]" if is_mp == 0 else ""
-            sub_tag = "⭐ " if is_sub else ""
+            sub_tag = sub_icon if is_sub else ""
 
             display_name = f"{sub_tag}{g_name}{sp_tag}"
 
@@ -524,6 +560,49 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
 
     except (discord.NotFound, discord.HTTPException):
         return []
+
+async def autocomplete_text_channels(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    if not interaction.guild:
+        return []
+
+    clean_current = current.strip().lower().lstrip("#")
+
+    # Filter to text channels in the server matching search term
+    matching_channels = [
+        ch for ch in interaction.guild.text_channels
+        if clean_current in ch.name.lower() or clean_current in str(ch.id)
+    ]
+
+    # Return up to 25 choices (Discord autocomplete limit)
+    return [
+        app_commands.Choice(
+            name=f"#{ch.name}"[:100],
+            value=str(ch.id)
+        )
+        for ch in matching_channels[:25]
+    ]
+
+async def is_lfg_allowed_in_channel(guild_id: int, channel_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+                "SELECT mode, whitelisted_channels FROM guild_lfg_settings WHERE guild_id = ?",
+                (guild_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+    if not row:
+        return True  # Default: allowed everywhere
+
+    mode, raw_whitelisted = row
+    if mode == "all":
+        return True
+    if mode == "none":
+        return False
+    if mode == "whitelist":
+        allowed_ids = set(raw_whitelisted.split(",")) if raw_whitelisted else set()
+        return str(channel_id) in allowed_ids
+
+    return True
 
 def format_interval(hours: float) -> str:
     """Helper to cleanly format update intervals into minutes or hours."""

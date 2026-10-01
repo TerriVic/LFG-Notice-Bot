@@ -83,6 +83,29 @@ async def init_db():
                          );
                          """)
 
+        await db.execute("""
+                         CREATE TABLE IF NOT EXISTS user_settings (
+                                                                      user_id INTEGER PRIMARY KEY,
+                                                                      ping_template TEXT,
+                                                                      sub_indicator TEXT DEFAULT '⭐'
+                         );
+                         """)
+
+        # Migration check for existing user_settings tables
+        async with db.execute("PRAGMA table_info(user_settings);") as cursor:
+            columns = [col[1] for col in await cursor.fetchall()]
+
+        if "sub_indicator" not in columns:
+            await db.execute("ALTER TABLE user_settings ADD COLUMN sub_indicator TEXT DEFAULT '⭐';")
+
+        await db.execute("""
+                         CREATE TABLE IF NOT EXISTS guild_lfg_settings (
+                                                                           guild_id INTEGER PRIMARY KEY,
+                                                                           mode TEXT NOT NULL DEFAULT 'all',
+                                                                           whitelisted_channels TEXT DEFAULT ''
+                         );
+                         """)
+
         await db.commit()
 
     print("[DB Setup] Schema checked and migrated safely.")

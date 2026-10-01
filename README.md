@@ -20,21 +20,24 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 ## 🛠Command Reference
 
 ### User Commands
-| Command                               | Description                                                                |
-|---------------------------------------|----------------------------------------------------------------------------|
-| `/subscribe <game>`                   | Subscribe to notifications for a game (with autocomplete & IGDB lookup).   |
-| `/unsubscribe <game>`                 | Unsubscribe from active notifications for a game.                          |
-| `/user_subscriptions [user] [public]` | View active game subscriptions for yourself or another member.             |
-| `/game_info <game>`                   | Get details, genres, and cover image for a game.                           |
-| `/ping_game <game> [public]`          | Send an LFG ping mentioning all subscribers of a game.                     |
-| `/show_subscribers <game>`            | View subscribers for a game without triggering a ping.                     |
-| `/top_games [limit] [public]`         | View the most subscribed games on the server.                              |
-| `/set_ping_template`                  | Set a custom template for your `/ping_game` notifications.                 |
-| `/view_ping_template`                 | View your current custom ping template setting.                            |
-| `/reset_ping_template`                | Reset your custom ping template to default.                                |
-| `/delete_my_subscriptions`            | Purge all your active game subscriptions                                   |
-| `/delete_all_my_data`                 | Purge all your active game subscriptions and user settings/ping templates. |
-| `/help [public]`                      | View an interactive command guide.                                         |
+| Command                                 | Description                                                                                       |
+|-----------------------------------------|---------------------------------------------------------------------------------------------------|
+| `/subscribe <game>`                     | Subscribe to notifications for a game (with autocomplete & IGDB lookup).                          |
+| `/unsubscribe <game>`                   | Unsubscribe from active notifications for a game.                                                 |
+| `/user_subscriptions [user] [public]`   | View active game subscriptions for yourself or another member.                                    |
+| `/game_info <game>`                     | Get details, genres, and cover image for a game.                                                  |
+| `/ping_game <game> [public]`            | Send an LFG ping mentioning all subscribers of a game.                                            |
+| `/show_subscribers <game>`              | View subscribers for a game without triggering a ping.                                            |
+| `/top_games [limit] [public]`           | View the most subscribed games on the server.                                                     |
+| `/set_ping_template`                    | Set a custom template for your `/ping_game` notifications.                                        |
+| `/view_ping_template`                   | View your current custom ping template setting.                                                   |
+| `/reset_ping_template`                  | Reset your custom ping template to default.                                                       |
+| `/set_subscribed_indicator <indicator>` | Set a custom icon/indicator for your subscribed games in autocomplete  (no custom emote support). |
+| `/view_subscribed_indicator`            | View your saved autocomplete subscribed game indicator.                                           |
+| `/reset_subscribed_indicator`           | Reset your subscribed game autocomplete indicator back to default (`⭐`).                          |
+| `/delete_my_subscriptions`              | Purge all your active game subscriptions                                                          |
+| `/delete_all_my_data`                   | Purge all your active game subscriptions and user settings/ping templates.                        |
+| `/help [public]`                        | View an interactive command guide.                                                                |
 
 ### Bot Config Commands (`/config`)
 | Command                                               | Description                                                                                                                                                        |
@@ -43,7 +46,8 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 | `/config edit_top_games <message> [limit] [interval]` | Update display limit or interval settings (e.g., `0.5` for 30m), or leave options empty to force an immediate refresh.                                             |
 | `/config force_update_top_games <message>`            | Force an immediate refresh on an active live tracker message.                                                                                                      |
 | `/config remove_top_games <message>`                  | Stop tracking and delete an active live top games message.                                                                                                         |
-| `/config server_overview`                             | View subscription details for members in the server where the command is called                                                                                    |
+| `/config set_lfg_channels <mode> [channels]`          | Restrict LFG pings (`/ping_game`) to specific whitelisted channels, allow them server-wide, or disable them server-wide.                                           |
+| `/config server_overview`                             | View subscription details for members in the server where the command is called.                                                                                   |                                                                                  |
 
 ---
 
