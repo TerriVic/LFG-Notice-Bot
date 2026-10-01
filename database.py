@@ -102,15 +102,18 @@ async def init_db():
                         PRIMARY KEY (user_id, guild_id)
                     );
                 """)
+                # noinspection SqlResolve
                 await db.execute("""
-                    INSERT OR IGNORE INTO user_settings_new (user_id, guild_id, quiet_mode, ping_template, sub_indicator)
-                    SELECT user_id, 0, 
-                           COALESCE(quiet_mode, 0), 
-                           ping_template, 
-                           COALESCE(sub_indicator, '⭐') 
-                    FROM user_settings;
-                """)
+                                 INSERT OR IGNORE INTO user_settings_new (user_id, guild_id, quiet_mode, ping_template, sub_indicator)
+                                 SELECT user_id,
+                                        0,
+                                        quiet_mode,
+                                        ping_template,
+                                        COALESCE(sub_indicator, '⭐')
+                                 FROM user_settings;
+                                 """)
                 await db.execute("DROP TABLE user_settings;")
+                # noinspection SqlResolve
                 await db.execute("ALTER TABLE user_settings_new RENAME TO user_settings;")
                 print("[DB Setup] Migration completed successfully.")
             else:
