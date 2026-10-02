@@ -2,9 +2,9 @@ name: Run Bot Tests
 
 on:
   push:
-    branches: [ main, master, dev ]
+    branches: [ main, master, develop ]
   pull_request:
-    branches: [ main, master, dev ]
+    branches: [ main, master, develop ]
 
 jobs:
   test:
