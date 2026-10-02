@@ -28,11 +28,11 @@ async def init_db():
         # Table for Guild LFG Channel Settings
         await db.execute("""
             CREATE TABLE IF NOT EXISTS guild_lfg_settings (
-                  guild_id INTEGER PRIMARY KEY,
-                  mode TEXT NOT NULL DEFAULT 'all', -- 'all', 'none', 'whitelist'
-                  whitelisted_channels TEXT DEFAULT '' -- Comma-separated list of channel IDs
-                         );
-                         """)
+                guild_id INTEGER PRIMARY KEY,
+                mode TEXT NOT NULL DEFAULT 'all', -- 'all', 'none', 'whitelist'
+                whitelisted_channels TEXT DEFAULT '' -- Comma-separated list of channel IDs
+            );
+        """)
 
         # 1. Global User Settings Table
         await db.execute("""
@@ -43,6 +43,13 @@ async def init_db():
                 quiet_mode INTEGER NOT NULL DEFAULT 0
             );
         """)
+
+        # Safely migration check: Ensure quiet_mode exists in user_settings if table was created previously
+        await ensure_columns(db, "user_settings", {
+            "ping_template": "TEXT",
+            "sub_indicator": "TEXT DEFAULT '⭐'",
+            "quiet_mode": "INTEGER NOT NULL DEFAULT 0"
+        })
 
         # 2. Server-Specific Overrides Table
         await db.execute("""
