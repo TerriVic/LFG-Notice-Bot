@@ -1,0 +1,7 @@
+[run]
+omit =
+    Tests/*
+    IGDB_Access_Token_Print.py
+    test_server_code_snippet.py
+    run_tests.py
+    bot.py
