@@ -24,117 +24,63 @@ async def ensure_columns(db: aiosqlite.Connection, table_name: str, expected_col
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        # 1. IGDB Games Table
+        # 1. Global User Settings Table
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS igdb_games (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                updated_at INTEGER,
-                first_release_date INTEGER DEFAULT NULL,
-                category INTEGER DEFAULT 0,
-                parent_game_id INTEGER DEFAULT NULL,
-                version_parent_id INTEGER DEFAULT NULL,
-                is_multiplayer INTEGER DEFAULT 0,
-                total_rating_count INTEGER DEFAULT 0
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INTEGER PRIMARY KEY,
+                ping_template TEXT,
+                sub_indicator TEXT DEFAULT '⭐',
+                quiet_mode INTEGER NOT NULL DEFAULT 0
             );
         """)
-        await ensure_columns(db, "igdb_games", {
-            "first_release_date": "INTEGER DEFAULT NULL",
-            "is_multiplayer": "INTEGER DEFAULT 0",
-            "category": "INTEGER DEFAULT 0",
-            "parent_game_id": "INTEGER DEFAULT NULL",
-            "version_parent_id": "INTEGER DEFAULT NULL",
-            "total_rating_count": "INTEGER DEFAULT 0"
-        })
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_igdb_multiplayer_name ON igdb_games(is_multiplayer, name);")
 
-        # 2. Subscriptions Table
+        # 2. Server-Specific Overrides Table
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS subscriptions (
+            CREATE TABLE IF NOT EXISTS user_guild_settings (
                 user_id INTEGER NOT NULL,
-                game_id INTEGER NOT NULL,
-                PRIMARY KEY (user_id, game_id)
-            );
-        """)
-
-        # 3. Live Top Games Trackers Table
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS live_top_games (
-                message_id INTEGER PRIMARY KEY,
                 guild_id INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                entry_limit INTEGER DEFAULT 10,
-                update_interval INTEGER DEFAULT 1,
-                last_updated INTEGER DEFAULT 0,
-                created_at INTEGER DEFAULT (strftime('%s', 'now'))
-            );
-        """)
-        await ensure_columns(db, "live_top_games", {
-            "update_interval": "INTEGER DEFAULT 1",
-            "last_updated": "INTEGER DEFAULT 0"
-        })
-
-        # 4. Guild LFG Settings
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS guild_lfg_settings (
-                guild_id INTEGER PRIMARY KEY,
-                mode TEXT NOT NULL DEFAULT 'all',
-                whitelisted_channels TEXT DEFAULT ''
+                quiet_mode INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, guild_id)
             );
         """)
 
-        # 5. User Settings Table (Migrates single primary key to composite (user_id, guild_id))
+        # Migration helper: Check if old user_settings has guild_id column
         async with db.execute("PRAGMA table_info(user_settings);") as cursor:
-            user_settings_info = await cursor.fetchall()
+            cols = [col[1] for col in await cursor.fetchall()]
 
-        if user_settings_info:
-            pk_count = sum(1 for col in user_settings_info if col[5] > 0)
+        if "guild_id" in cols:
+            print("[DB Setup] Migrating old user_settings to normalized schema...")
 
-            # Migrate if schema uses single-column PRIMARY KEY (user_id)
-            if pk_count < 2:
-                print("[DB Setup] Migrating user_settings to composite PRIMARY KEY (user_id, guild_id)...")
-                await db.execute("""
-                    CREATE TABLE IF NOT EXISTS user_settings_new (
-                        user_id INTEGER NOT NULL,
-                        guild_id INTEGER NOT NULL DEFAULT 0,
-                        quiet_mode INTEGER NOT NULL DEFAULT 0,
-                        ping_template TEXT,
-                        sub_indicator TEXT DEFAULT '⭐',
-                        PRIMARY KEY (user_id, guild_id)
-                    );
-                """)
-                # noinspection SqlResolve
-                await db.execute("""
-                                 INSERT OR IGNORE INTO user_settings_new (user_id, guild_id, quiet_mode, ping_template, sub_indicator)
-                                 SELECT user_id,
-                                        0,
-                                        quiet_mode,
-                                        ping_template,
-                                        COALESCE(sub_indicator, '⭐')
-                                 FROM user_settings;
-                                 """)
-                await db.execute("DROP TABLE user_settings;")
-                # noinspection SqlResolve
-                await db.execute("ALTER TABLE user_settings_new RENAME TO user_settings;")
-                print("[DB Setup] Migration completed successfully.")
-            else:
-                await ensure_columns(db, "user_settings", {
-                    "guild_id": "INTEGER NOT NULL DEFAULT 0",
-                    "quiet_mode": "INTEGER NOT NULL DEFAULT 0",
-                    "ping_template": "TEXT",
-                    "sub_indicator": "TEXT DEFAULT '⭐'"
-                })
-        else:
+            # Step A: Create temporary table for new user_settings format
             await db.execute("""
-                CREATE TABLE IF NOT EXISTS user_settings (
-                    user_id INTEGER NOT NULL,
-                    guild_id INTEGER NOT NULL DEFAULT 0,
-                    quiet_mode INTEGER NOT NULL DEFAULT 0,
+                CREATE TABLE IF NOT EXISTS user_settings_v2 (
+                    user_id INTEGER PRIMARY KEY,
                     ping_template TEXT,
                     sub_indicator TEXT DEFAULT '⭐',
-                    PRIMARY KEY (user_id, guild_id)
+                    quiet_mode INTEGER NOT NULL DEFAULT 0
                 );
             """)
+
+            # Step B: Copy global rows (guild_id = 0) into user_settings_v2
+            await db.execute("""
+                INSERT OR IGNORE INTO user_settings_v2 (user_id, ping_template, sub_indicator, quiet_mode)
+                SELECT user_id, ping_template, COALESCE(sub_indicator, '⭐'), quiet_mode
+                FROM user_settings
+                WHERE guild_id = 0;
+            """)
+
+            # Step C: Copy server-scoped rows (guild_id != 0) into user_guild_settings
+            await db.execute("""
+                INSERT OR IGNORE INTO user_guild_settings (user_id, guild_id, quiet_mode)
+                SELECT user_id, guild_id, quiet_mode
+                FROM user_settings
+                WHERE guild_id != 0;
+            """)
+
+            # Step D: Swap tables
+            await db.execute("DROP TABLE user_settings;")
+            await db.execute("ALTER TABLE user_settings_v2 RENAME TO user_settings;")
+            print("[DB Setup] Migration completed successfully!")
 
         await db.commit()
 
