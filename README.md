@@ -27,6 +27,7 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 | `/user_subscriptions [user] [public]`   | View active game subscriptions for yourself or another member.                                    |
 | `/game_info <game> [public]`            | Get details, genres, and cover image for a game.                                                  |
 | `/ping_game <game> [public]`            | Send an LFG ping mentioning all subscribers of a game.                                            |
+| `/quiet_mode [enabled] [scope]`         | Mute/unmute LFG notifications globally or specifically for the current server.                    |
 | `/show_subscribers <game>`              | View subscribers for a game without triggering a ping.                                            |
 | `/top_games [limit] [public]`           | View the most subscribed games on the server.                                                     |
 | `/set_ping_template <template>`         | Set a custom template for your `/ping_game` notifications.                                        |

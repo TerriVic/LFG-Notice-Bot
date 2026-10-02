@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 
 import aiohttp
 import aiosqlite
@@ -136,6 +137,57 @@ async def init_db():
             """)
 
         await db.commit()
+
+        # 6. Repair missing igdb_games entries for unsubscribe autocomplete
+        async with db.execute(
+            """
+            SELECT DISTINCT s.game_id 
+            FROM subscriptions s 
+            LEFT JOIN igdb_games g ON s.game_id = g.id 
+            WHERE g.id IS NULL
+            """
+        ) as cursor:
+            missing_ids = [row[0] for row in await cursor.fetchall()]
+
+        client_id = os.getenv("TWITCH_CLIENT_ID")
+        access_token = os.getenv("TWITCH_ACCESS_TOKEN")
+
+        if missing_ids and client_id and access_token:
+            headers = {
+                "Client-ID": client_id,
+                "Authorization": f"Bearer {access_token}"
+            }
+            chunk_size = 500
+            for i in range(0, len(missing_ids), chunk_size):
+                chunk = missing_ids[i:i + chunk_size]
+                ids_str = ",".join(str(gid) for gid in chunk)
+                body = f"fields id, name, category, first_release_date; where id = ({ids_str}); limit {chunk_size};"
+
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
+                            if resp.status == 200:
+                                games = await resp.json()
+                                updates = [
+                                    (
+                                        g["id"],
+                                        g["name"],
+                                        int(time.time()),
+                                        g.get("first_release_date"),
+                                        g.get("category", 0)
+                                    )
+                                    for g in games
+                                ]
+                                await db.executemany(
+                                    """
+                                    INSERT OR IGNORE INTO igdb_games (id, name, updated_at, first_release_date, category)
+                                    VALUES (?, ?, ?, ?, ?)
+                                    """,
+                                    updates
+                                )
+                                await db.commit()
+                except Exception as e:
+                    print(f"[DB Setup] Failed to repair orphan subscription: {e}")
 
     print("[DB Setup] Schema checked and migrated safely.")
 

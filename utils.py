@@ -134,9 +134,8 @@ async def fetch_and_cache_game_from_igdb(game_name: str) -> tuple[int, str] | No
 
 async def resolve_to_base_game(game_id: int, game_name: str):
     """
-    Only resolve to parent game if the item is explicitly a DLC, expansion,
-    or standalone expansion (category in {1, 2}). Standalone/jam entries,
-    remasters, or version parents are preserved as-is.
+    Only resolve to parent game if the item is explicitly a DLC or expansion.
+    Preserves parent game in igdb_games cache.
     """
     client_id = os.getenv("TWITCH_CLIENT_ID")
     access_token = os.getenv("TWITCH_ACCESS_TOKEN")
@@ -160,20 +159,30 @@ async def resolve_to_base_game(game_id: int, game_name: str):
                         item = data[0]
                         category = item.get("category", 0)
 
-                        # Only follow parent_game if it is explicitly an Expansion (1) or DLC (2)
                         if category in {1, 2}:
                             parent = item.get("parent_game")
                             if parent:
                                 p_id = parent.get("id") if isinstance(parent, dict) else parent
-                                # Recursively fetch parent
-                                p_body = f'fields id, name; where id = {p_id};'
+                                p_body = f'fields id, name, category; where id = {p_id};'
                                 async with session.post("https://api.igdb.com/v4/games", headers=headers, data=p_body) as p_resp:
                                     if p_resp.status == 200:
                                         p_data = await p_resp.json()
                                         if p_data:
-                                            return p_data[0]["id"], p_data[0]["name"]
+                                            p_item = p_data[0]
+                                            p_official_name = p_item["name"]
 
-                        # Otherwise keep the exact game name/ID selected
+                                            # Cache base game into local DB
+                                            async with aiosqlite.connect(DB_PATH) as db:
+                                                await db.execute(
+                                                    """INSERT OR IGNORE INTO igdb_games
+                                                           (id, name, updated_at, category)
+                                                       VALUES (?, ?, ?, ?)""",
+                                                    (p_item["id"], p_official_name, int(time.time()), p_item.get("category", 0))
+                                                )
+                                                await db.commit()
+
+                                            return p_item["id"], p_official_name
+
                         return game_id, item.get("name", game_name)
     except Exception as e:
         print(f"Error in resolve_to_base_game: {e}")
@@ -199,10 +208,13 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
         # Retrieve user custom subscribed indicator preference
         sub_icon = "⭐ "
         async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT sub_indicator FROM user_settings WHERE user_id = ?", (user_id,)) as cursor:
-                row = await cursor.fetchone()
-                if row and row[0]:
-                    sub_icon = f"{row[0]} "
+            async with db.execute(
+                    "SELECT sub_indicator FROM user_settings WHERE user_id = ? AND guild_id = 0",
+                    (interaction.user.id,)
+            ) as cursor:
+                indicator_row = await cursor.fetchone()
+                if indicator_row and indicator_row[0]:
+                    sub_icon = f"{indicator_row[0]} "
 
         # 1. Default empty input handling
         if not clean_current:
