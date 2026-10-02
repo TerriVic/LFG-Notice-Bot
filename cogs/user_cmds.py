@@ -1,4 +1,5 @@
 import datetime
+import os
 
 import aiosqlite
 import discord
@@ -60,6 +61,9 @@ class UserCommands(commands.Cog):
             await interaction.response.send_message("This command can only be used inside a server.", ephemeral=True)
             return
 
+        # Defer immediately to prevent 3-second timeout
+        await interaction.response.defer(ephemeral=not public)
+
         # Cap the maximum limit to prevent huge wall-of-text messages
         limit = max(1, min(limit, 25))
 
@@ -68,7 +72,7 @@ class UserCommands(commands.Cog):
                 rows = await cursor.fetchall()
 
         if not rows:
-            await interaction.response.send_message("There are no active subscriptions in this server.", ephemeral=not public)
+            await interaction.followup.send("There are no active subscriptions in this server.", ephemeral=not public)
             return
 
         # Count subscriptions per game for members present in this guild
@@ -78,7 +82,7 @@ class UserCommands(commands.Cog):
                 game_counts[game_name] = game_counts.get(game_name, 0) + 1
 
         if not game_counts:
-            await interaction.response.send_message("No members in this server are currently subscribed to any games.", ephemeral=not public)
+            await interaction.followup.send("No members in this server are currently subscribed to any games.", ephemeral=not public)
             return
 
         # Sort games by subscriber count in descending order
@@ -91,7 +95,7 @@ class UserCommands(commands.Cog):
             color=discord.Color.gold()
         )
 
-        await interaction.response.send_message(embed=embed, ephemeral=not public)
+        await interaction.followup.send(embed=embed, ephemeral=not public)
 
     @app_commands.command(name="subscribe", description="Subscribe to a game")
     @app_commands.autocomplete(game=autocomplete_games)
@@ -149,6 +153,9 @@ class UserCommands(commands.Cog):
             )
             return
 
+        # Defer immediately to allow database and HTTP operations
+        await interaction.response.defer(ephemeral=True)
+
         clean_game = game.strip().replace("’", "'").replace("‘", "'")
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT id, name FROM igdb_games WHERE name = ?", (clean_game,)) as cursor:
@@ -156,7 +163,7 @@ class UserCommands(commands.Cog):
 
         # Handle missing game
         if not row:
-            await interaction.response.send_message("Game not found.", ephemeral=True)
+            await interaction.followup.send("Game not found.", ephemeral=True)
             return
 
         game_id, official_name = await resolve_to_base_game(row[0], row[1])
@@ -168,7 +175,7 @@ class UserCommands(commands.Cog):
             )
             await db.commit()
 
-        await interaction.response.send_message(f"You unsubscribed from **{official_name}**", ephemeral=True)
+        await interaction.followup.send(f"You unsubscribed from **{official_name}**", ephemeral=True)
 
     @app_commands.command(name="ping_game", description="Ping all users subscribed to a game")
     @app_commands.describe(
@@ -178,7 +185,7 @@ class UserCommands(commands.Cog):
     @app_commands.checks.cooldown(1, 30.0)
     @app_commands.autocomplete(game=autocomplete_games)
     async def ping_game(self, interaction: discord.Interaction, game: str, note: str = None):
-        # 1. Check channel permissions using the helper function
+        # 1. Check LFG channel permissions before deferring
         if interaction.guild_id:
             allowed = await is_lfg_allowed_in_channel(interaction.guild_id, interaction.channel_id)
             if not allowed:
@@ -188,10 +195,13 @@ class UserCommands(commands.Cog):
                 )
                 return
 
+        # 2. Defer immediately to prevent Discord interaction timeout
         await interaction.response.defer()
 
         clean_game = game.strip().replace("’", "'").replace("‘", "'")
+        current_guild_id = interaction.guild_id or 0
 
+        # 3. Single-context database handling
         async with aiosqlite.connect(DB_PATH) as db:
             # Lookup game ID
             async with db.execute("SELECT id, name FROM igdb_games WHERE name = ? COLLATE NOCASE", (clean_game,)) as cursor:
@@ -203,25 +213,40 @@ class UserCommands(commands.Cog):
 
             game_id, official_name = await resolve_to_base_game(row[0], row[1])
 
-            # Query subscribers excluding the user invoking the command
+            # Fetch all subscribers and check quiet mode status
             async with db.execute(
-                "SELECT user_id FROM subscriptions WHERE game_id = ? AND user_id != ?",
-                (game_id, interaction.user.id)
+                    """
+                    SELECT 
+                        s.user_id,
+                        CASE WHEN EXISTS (
+                            SELECT 1 FROM user_settings us
+                            WHERE us.user_id = s.user_id
+                              AND us.guild_id IN (0, ?)
+                              AND us.quiet_mode = 1
+                        ) THEN 1 ELSE 0 END AS is_quiet
+                    FROM subscriptions s
+                    WHERE s.game_id = ?
+                      AND s.user_id != ?
+                    """,
+                    (current_guild_id, game_id, interaction.user.id)
             ) as cursor:
-                users = await cursor.fetchall()
+                rows = await cursor.fetchall()
 
-            # Retrieve user custom template if saved
             async with db.execute(
-                "SELECT ping_template FROM user_settings WHERE user_id = ?",
-                (interaction.user.id,)
+                    "SELECT ping_template FROM user_settings WHERE user_id = ? AND guild_id = 0",
+                    (interaction.user.id,)
             ) as cursor:
                 template_row = await cursor.fetchone()
 
-        if not users:
-            await interaction.followup.send(f"No subscribers for **{official_name}**.")
+        if not rows:
+            await interaction.followup.send(f"No other subscribers to ping for **{official_name}**.")
             return
 
-        mentions = " ".join(f"<@{u[0]}>" for u in users)
+        active_user_ids = [r[0] for r in rows if r[1] == 0]
+        quiet_user_ids = [r[0] for r in rows if r[1] == 1]
+
+        # Format mentions for phantom badges
+        all_mentions = " ".join(f"<@{r[0]}>" for r in rows)
         caller_mention = interaction.user.mention
         formatted_game = f"**{official_name}**"
         clean_note = note.strip() if note else ""
@@ -234,19 +259,32 @@ class UserCommands(commands.Cog):
                 .replace("{caller}", caller_mention)
                 .replace("{user}", caller_mention)
                 .replace("{game}", formatted_game)
-                .replace("{mentions}", mentions)
+                .replace("{mentions}", all_mentions)
                 .replace("{note}", clean_note)
             )
             if clean_note and clean_note not in msg:
                 msg += f"\n> {clean_note}"
-            if mentions not in msg:
-                msg += f"\n{mentions}"
+            if all_mentions not in msg:
+                msg += f"\n{all_mentions}"
         else:
-            msg = f"{caller_mention} wants to play {formatted_game}! {mentions}"
+            msg = f"{caller_mention} wants to play {formatted_game}! {all_mentions}"
             if clean_note:
                 msg += f"\n> {clean_note}"
 
-        await interaction.followup.send(msg)
+        if quiet_user_ids:
+            quiet_mentions_str = ", ".join(f"<@{uid}>" for uid in quiet_user_ids)
+            verb = "has" if len(quiet_user_ids) == 1 else "have"
+            msg += f"\n\n-# {quiet_mentions_str} {verb} quiet mode turned on"
+
+        # Restrict notification pings strictly to active (non-quiet) users
+        allowed_users = [discord.Object(id=uid) for uid in active_user_ids]
+        allowed_mentions = discord.AllowedMentions(
+            users=allowed_users if allowed_users else False,
+            roles=False,
+            everyone=False
+        )
+
+        await interaction.followup.send(msg, allowed_mentions=allowed_mentions)
 
     @app_commands.command(name="set_ping_template", description="Customize how your /ping_game calls look")
     @app_commands.describe(template="Your custom message. Placeholders: {caller}, {game}, {mentions}, {note}")
@@ -264,13 +302,14 @@ class UserCommands(commands.Cog):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 """
-                INSERT INTO user_settings (user_id, ping_template)
-                VALUES (?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET ping_template = excluded.ping_template
+                INSERT INTO user_settings (user_id, guild_id, ping_template)
+                VALUES (?, 0, ?)
+                ON CONFLICT(user_id, guild_id) DO UPDATE SET ping_template = excluded.ping_template
                 """,
                 (interaction.user.id, final_template)
             )
             await db.commit()
+
 
         # Dummy mentions for template preview
         mock_caller = interaction.user.mention
@@ -294,7 +333,10 @@ class UserCommands(commands.Cog):
     @app_commands.command(name="view_ping_template", description="View your current custom ping template setting")
     async def view_ping_template(self, interaction: discord.Interaction):
         async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT ping_template FROM user_settings WHERE user_id = ?", (interaction.user.id,)) as cursor:
+            async with db.execute(
+                    "SELECT ping_template FROM user_settings WHERE user_id = ? AND guild_id = 0",
+                    (interaction.user.id,)
+            ) as cursor:
                 row = await cursor.fetchone()
 
         if not row or not row[0]:
@@ -307,7 +349,6 @@ class UserCommands(commands.Cog):
 
         template = row[0]
 
-        # Dummy mentions for template preview
         mock_caller = interaction.user.mention
         mock_mentions = "<@123456789012345678>"
         preview = (
@@ -327,11 +368,12 @@ class UserCommands(commands.Cog):
 
     @app_commands.command(name="reset_ping_template", description="Reset your ping template back to default")
     async def reset_ping_template(self, interaction: discord.Interaction):
-        # ... (check if setting exists) ...
-
         async def do_reset(_inter: discord.Interaction):
             async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute("DELETE FROM user_settings WHERE user_id = ?", (interaction.user.id,))
+                await db.execute(
+                    "UPDATE user_settings SET ping_template = NULL WHERE user_id = ? AND guild_id = 0",
+                    (interaction.user.id,)
+                )
                 await db.commit()
 
         view = GenericConfirmationView(
@@ -554,9 +596,9 @@ class UserCommands(commands.Cog):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 """
-                INSERT INTO user_settings (user_id, sub_indicator)
-                VALUES (?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET sub_indicator = excluded.sub_indicator
+                INSERT INTO user_settings (user_id, guild_id, sub_indicator)
+                VALUES (?, 0, ?)
+                ON CONFLICT(user_id, guild_id) DO UPDATE SET sub_indicator = excluded.sub_indicator
                 """,
                 (interaction.user.id, clean_indicator)
             )
@@ -571,7 +613,10 @@ class UserCommands(commands.Cog):
     @app_commands.command(name="view_subscribed_indicator", description="View your current custom subscribed game indicator")
     async def view_subscribed_indicator(self, interaction: discord.Interaction):
         async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT sub_indicator FROM user_settings WHERE user_id = ?", (interaction.user.id,)) as cursor:
+            async with db.execute(
+                    "SELECT sub_indicator FROM user_settings WHERE user_id = ? AND guild_id = 0",
+                    (interaction.user.id,)
+            ) as cursor:
                 row = await cursor.fetchone()
 
         indicator = row[0] if (row and row[0]) else "⭐"
@@ -588,9 +633,9 @@ class UserCommands(commands.Cog):
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
                     """
-                    INSERT INTO user_settings (user_id, sub_indicator)
-                    VALUES (?, '⭐')
-                    ON CONFLICT(user_id) DO UPDATE SET sub_indicator = '⭐'
+                    INSERT INTO user_settings (user_id, guild_id, sub_indicator)
+                    VALUES (?, 0, '⭐')
+                    ON CONFLICT(user_id, guild_id) DO UPDATE SET sub_indicator = '⭐'
                     """,
                     (interaction.user.id,)
                 )
@@ -610,10 +655,95 @@ class UserCommands(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="help", description="Show information about available bot commands")
+    @app_commands.command(name="quiet_mode", description="Toggle or set quiet mode notifications")
     @app_commands.describe(
-        public="Set to True to share publicly (default: False)"
+        enabled="Set True to mute notifications, False to unmute, or leave empty to toggle",
+        scope="Apply setting globally across all servers or only to this current server"
     )
+    @app_commands.choices(scope=[
+        app_commands.Choice(name="Global (All Servers)", value="global"),
+        app_commands.Choice(name="Current Server Only", value="server")
+    ])
+    async def quiet_mode(
+        self,
+        interaction: discord.Interaction,
+        enabled: bool = None,
+        scope: app_commands.Choice[str] = None
+    ):
+        # 1. Immediately defer response
+        await interaction.response.defer(ephemeral=True)
+
+        user_id = interaction.user.id
+        chosen_scope = scope.value if scope else "global"
+
+        if chosen_scope == "server" and not interaction.guild_id:
+            await interaction.followup.send(
+                "❌ Server-scoped quiet mode can only be configured inside a server channel.",
+                ephemeral=True
+            )
+            return
+
+        guild_id = interaction.guild_id if chosen_scope == "server" else 0
+
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                if enabled is None:
+                    # Query existing state for this scope
+                    async with db.execute(
+                        "SELECT quiet_mode FROM user_settings WHERE user_id = ? AND guild_id = ?",
+                        (user_id, guild_id)
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                        current_state = row[0] if row else 0
+                        new_state = 1 if current_state == 0 else 0
+                else:
+                    new_state = 1 if enabled else 0
+
+                if chosen_scope == "global":
+                    # Update quiet_mode across all server entries for this user
+                    await db.execute(
+                        "UPDATE user_settings SET quiet_mode = ? WHERE user_id = ?",
+                        (new_state, user_id)
+                    )
+                    # Ensure global row (guild_id = 0) exists
+                    await db.execute(
+                        """
+                        INSERT INTO user_settings (user_id, guild_id, quiet_mode) 
+                        VALUES (?, 0, ?)
+                        ON CONFLICT(user_id, guild_id) DO UPDATE SET quiet_mode = excluded.quiet_mode
+                        """,
+                        (user_id, new_state)
+                    )
+                else:
+                    # Native UPSERT targeting composite key (user_id, guild_id) for specific server
+                    await db.execute(
+                        """
+                        INSERT INTO user_settings (user_id, guild_id, quiet_mode) 
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(user_id, guild_id) DO UPDATE SET quiet_mode = excluded.quiet_mode
+                        """,
+                        (user_id, guild_id, new_state)
+                    )
+
+                await db.commit()
+
+            status_text = "enabled 🔕" if new_state == 1 else "disabled 🔔"
+            scope_text = "this server" if chosen_scope == "server" else "all servers (Global)"
+
+            await interaction.followup.send(
+                f"Quiet mode is now **{status_text}** for **{scope_text}**.",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            # Catch exceptions so the interaction completes instead of hanging indefinitely
+            await interaction.followup.send(
+                f"❌ An error occurred while updating quiet mode: `{e}`",
+                ephemeral=True
+            )
+
+    @app_commands.command(name="help", description="Show information about available bot commands")
+    @app_commands.describe(public="Set to True to send response publicly in channel (Default: False)")
     async def help_command(self, interaction: discord.Interaction, public: bool = False):
         # Lookup helper: supports standalone commands or group subcommands
         def fmt(name: str, sub: str = None) -> str:
@@ -625,9 +755,10 @@ class UserCommands(commands.Cog):
 
         embed = discord.Embed(
             title="Bot Command Guide",
-            description="Here is everything you can do with the bot:\n"
-                        "-# Responses to commands with variable `[public]` are visible only to you by default. Set `public: True` to share them in channel.\n"
-                        f"-# All other command responses, (aside from {fmt('ping_game')}) are always private.",
+            description=(
+                "Here is everything you can do with the bot:\n"
+                "-# Options marked `[public]` are visible only to you by default. Set `public: True` to share them in channel."
+            ),
             color=discord.Color.blue()
         )
 
@@ -637,8 +768,7 @@ class UserCommands(commands.Cog):
                 f"• {fmt('game_info')} `<game>` `[public]` — Get details, genres, and cover image for a game.\n"
                 f"• {fmt('subscribe')} `<game>` — Subscribe to LFG notifications.\n"
                 f"• {fmt('unsubscribe')} `<game>` — Unsubscribe from active notifications.\n"
-                f"• {fmt('user_subscriptions')} `[user]` — View active subscriptions of specified user (defaults to self).\n"
-                f"• {fmt('delete_my_subscriptions')} — Delete your active game subscriptions."
+                f"• {fmt('user_subscriptions')} `[user]` `[public]` — View active game subscriptions."
             ),
             inline=False
         )
@@ -646,47 +776,45 @@ class UserCommands(commands.Cog):
         embed.add_field(
             name="Server Activity & Social",
             value=(
-                f"• {fmt('ping_game')} `<game>` `[note]` — Ping subscribers with optional note.\n"
-                f"• {fmt('set_ping_template')} `<template>` — Set custom ping format.\n"
-                f"• {fmt('view_ping_template')} — View your saved ping format.\n"
-                f"• {fmt('reset_ping_template')} — Reset ping format to default.\n"
-                f"• {fmt('set_subscribed_indicator')} `<indicator>` — Set custom autocomplete icon for subscribed games.\n"
-                f"• {fmt('view_subscribed_indicator')} — View your current subscribed game indicator.\n"
-                f"• {fmt('reset_subscribed_indicator')} — Reset subscribed game indicator to default (`⭐`).\n"
+                f"• {fmt('ping_game')} `<game>` `[public]` — Send an LFG ping mentioning subscribers.\n"
+                f"• {fmt('quiet_mode')} `[enabled]` `[scope]` — Toggle or set quiet mode notifications globally or per-server.\n"
+                f"• {fmt('set_ping_template')} `<template>` — Set custom template for `/ping_game` notifications.\n"
+                f"• {fmt('view_ping_template')} — View your saved custom ping format.\n"
+                f"• {fmt('reset_ping_template')} — Reset ping template to default.\n"
+                f"• {fmt('set_subscribed_indicator')} `<indicator>` — Set custom icon for subscribed games in autocomplete.\n"
+                f"• {fmt('view_subscribed_indicator')} — View saved autocomplete indicator.\n"
+                f"• {fmt('reset_subscribed_indicator')} — Reset autocomplete indicator to default (`⭐`).\n"
                 f"• {fmt('top_games')} `[limit]` `[public]` — View popular server games.\n"
-                f"• {fmt('show_subscribers')} `<game>` — List subscribers for specified game."
+                f"• {fmt('show_subscribers')} `<game>` — List subscribers for a game."
             ),
-            inline=False
-        )
-
-        embed.add_field(
-            name="Misc.",
-            value=f"• {fmt('help')} `[public]` — Displays this help message.",
             inline=False
         )
 
         embed.add_field(
             name="Data & Privacy",
             value=(
-                f"• {fmt('delete_all_my_data')} — Delete all subscriptions and settings (e.g., ping templates, custom indicators)."
+                f"• {fmt('delete_my_subscriptions')} — Purge all your active game subscriptions.\n"
+                f"• {fmt('delete_all_my_data')} — Purge all game subscriptions and user settings/ping templates."
             ),
             inline=False
         )
 
-        # Conditionally display admin section if user has Administrator permissions
+        # Conditionally display admin section if user has Administrator permissions or is bot owner
         is_admin = interaction.permissions and interaction.permissions.administrator
-        if is_admin:
-            # Visual separator line (only appears for admins/owners)
-            embed.add_field(name="\u200b", value="─────────────────────────────\n", inline=False)
+        raw_owner_id = os.getenv("BOT_OWNER_ID")
+        is_owner = raw_owner_id and raw_owner_id.isdigit() and interaction.user.id == int(raw_owner_id)
+
+        if is_admin or is_owner:
+            embed.add_field(name="\u200b", value="─────────────────────────────", inline=False)
             embed.add_field(
                 name="Server Administration",
                 value=(
-                    f"• {fmt('config', 'setup_top_games')} `[limit] [interval]` — Post a live-updating top games message (interval in hours, e.g., 0.25 for 15m).\n"
-                    f"• {fmt('config', 'edit_top_games')} `<message> [limit] [interval]` — Edit tracker settings or force a refresh if options are left empty.\n"
+                    f"• {fmt('config', 'setup_top_games')} `[limit]` `[interval]` — Post a live-updating top games message.\n"
+                    f"• {fmt('config', 'edit_top_games')} `<message>` `[limit]` `[interval]` — Edit tracker settings or force a refresh.\n"
                     f"• {fmt('config', 'force_update_top_games')} `<message>` — Force an immediate refresh on a live tracker.\n"
-                    f"• {fmt('config', 'remove_top_games')} `<message>` — Stop tracking and delete an active live top games message.\n"
-                    f"• {fmt('config', 'set_lfg_channels')} `<mode> [channels]` — Set channel restrictions for LFG pings.\n"
-                    f"• {fmt('config', 'server_overview')} — View subscription details for members in this server."
+                    f"• {fmt('config', 'remove_top_games')} `<message>` — Stop tracking and delete a live top games message.\n"
+                    f"• {fmt('config', 'set_lfg_channels')} `<mode>` `[channels]` — Restrict, allow, or disable `/ping_game` server-wide.\n"
+                    f"• {fmt('config', 'server_overview')} — View subscription details for members in the server."
                 ),
                 inline=False
             )

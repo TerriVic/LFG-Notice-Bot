@@ -63,14 +63,7 @@ async def sync_commands(ctx: commands.Context, guild_id: int = None):
 
 @client.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.CheckFailure):
-        msg = "⛔ You do not have permission to run this administrative command."
-        if interaction.response.is_done():
-            await interaction.followup.send(msg, ephemeral=True)
-        else:
-            await interaction.response.send_message(msg, ephemeral=True)
-        return
-
+    # Handle cooldowns first and return early
     if isinstance(error, app_commands.CommandOnCooldown):
         seconds = round(error.retry_after)
         msg = f"⏳ Easy there! You can use this command again in **{seconds} seconds**."
@@ -78,6 +71,16 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             await interaction.followup.send(msg, ephemeral=True)
         else:
             await interaction.response.send_message(msg, ephemeral=True)
+        return
+
+    # Handle general permission/check failures
+    if isinstance(error, app_commands.CheckFailure):
+        msg = "⛔ You do not have permission to run this administrative command."
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+        return
 
 @client.event
 async def on_ready():

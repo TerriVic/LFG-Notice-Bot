@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 
 import aiohttp
 import aiosqlite
@@ -11,104 +12,185 @@ DB_PATH = os.path.join(DATA_DIR, "db.sqlite")
 # Ensure the data directory exists before opening SQLite
 os.makedirs(DATA_DIR, exist_ok=True)
 
+async def ensure_columns(db: aiosqlite.Connection, table_name: str, expected_columns: dict):
+    """Helper to safely add missing columns to an existing table without breaking schema."""
+    async with db.execute(f"PRAGMA table_info({table_name});") as cursor:
+        existing_columns = [col[1] for col in await cursor.fetchall()]
+
+    for col_name, col_type in expected_columns.items():
+        if col_name not in existing_columns:
+            await db.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type};")
+
+
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
+        # 1. IGDB Games Table
         await db.execute("""
-                         CREATE TABLE IF NOT EXISTS igdb_games (
-                                                                   id INTEGER PRIMARY KEY,
-                                                                   name TEXT NOT NULL,
-                                                                   updated_at INTEGER,
-                                                                   first_release_date INTEGER DEFAULT NULL,
-                                                                   category INTEGER DEFAULT 0,
-                                                                   parent_game_id INTEGER DEFAULT NULL,
-                                                                   version_parent_id INTEGER DEFAULT NULL,
-                                                                   is_multiplayer INTEGER DEFAULT 0,
-                                                                   total_rating_count INTEGER DEFAULT 0
-                         );
-                         """)
-
-        # Dynamic Migration: Fetch existing column names
-        async with db.execute("PRAGMA table_info(igdb_games);") as cursor:
-            columns = [column[1] for column in await cursor.fetchall()]
-
-        # Ensure all modern columns exist on legacy databases
-        if "first_release_date" not in columns:
-            await db.execute("ALTER TABLE igdb_games ADD COLUMN first_release_date INTEGER DEFAULT NULL;")
-        if "is_multiplayer" not in columns:
-            await db.execute("ALTER TABLE igdb_games ADD COLUMN is_multiplayer INTEGER DEFAULT 0;")
-        if "category" not in columns:
-            await db.execute("ALTER TABLE igdb_games ADD COLUMN category INTEGER DEFAULT 0;")
-        if "parent_game_id" not in columns:
-            await db.execute("ALTER TABLE igdb_games ADD COLUMN parent_game_id INTEGER DEFAULT NULL;")
-        if "version_parent_id" not in columns:
-            await db.execute("ALTER TABLE igdb_games ADD COLUMN version_parent_id INTEGER DEFAULT NULL;")
-        if "total_rating_count" not in columns:
-            await db.execute("ALTER TABLE igdb_games ADD COLUMN total_rating_count INTEGER DEFAULT 0;")
-
+            CREATE TABLE IF NOT EXISTS igdb_games (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                updated_at INTEGER,
+                first_release_date INTEGER DEFAULT NULL,
+                category INTEGER DEFAULT 0,
+                parent_game_id INTEGER DEFAULT NULL,
+                version_parent_id INTEGER DEFAULT NULL,
+                is_multiplayer INTEGER DEFAULT 0,
+                total_rating_count INTEGER DEFAULT 0
+            );
+        """)
+        await ensure_columns(db, "igdb_games", {
+            "first_release_date": "INTEGER DEFAULT NULL",
+            "is_multiplayer": "INTEGER DEFAULT 0",
+            "category": "INTEGER DEFAULT 0",
+            "parent_game_id": "INTEGER DEFAULT NULL",
+            "version_parent_id": "INTEGER DEFAULT NULL",
+            "total_rating_count": "INTEGER DEFAULT 0"
+        })
         await db.execute("CREATE INDEX IF NOT EXISTS idx_igdb_multiplayer_name ON igdb_games(is_multiplayer, name);")
 
+        # 2. Subscriptions Table
         await db.execute("""
-                         CREATE TABLE IF NOT EXISTS subscriptions (
-                                                                      user_id INTEGER NOT NULL,
-                                                                      game_id INTEGER NOT NULL,
-                                                                      PRIMARY KEY (user_id, game_id)
-                             );
-                         """)
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                user_id INTEGER NOT NULL,
+                game_id INTEGER NOT NULL,
+                PRIMARY KEY (user_id, game_id)
+            );
+        """)
 
-        async with db.execute("PRAGMA table_info(live_top_games);") as cursor:
-            columns = [col[1] for col in await cursor.fetchall()]
-
-        if columns:
-            if "update_interval" not in columns:
-                await db.execute("ALTER TABLE live_top_games ADD COLUMN update_interval INTEGER DEFAULT 1;")
-            if "last_updated" not in columns:
-                await db.execute("ALTER TABLE live_top_games ADD COLUMN last_updated INTEGER DEFAULT 0;")
-
+        # 3. Live Top Games Trackers Table
         await db.execute("""
-                         CREATE TABLE IF NOT EXISTS live_top_games (
-                                                                       message_id INTEGER PRIMARY KEY,
-                                                                       guild_id INTEGER NOT NULL,
-                                                                       channel_id INTEGER NOT NULL,
-                                                                       entry_limit INTEGER DEFAULT 10,
-                                                                       update_interval INTEGER DEFAULT 1,
-                                                                       last_updated INTEGER DEFAULT 0,
-                                                                       created_at INTEGER DEFAULT (strftime('%s', 'now'))
-                         );
-                         """)
+            CREATE TABLE IF NOT EXISTS live_top_games (
+                message_id INTEGER PRIMARY KEY,
+                guild_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                entry_limit INTEGER DEFAULT 10,
+                update_interval INTEGER DEFAULT 1,
+                last_updated INTEGER DEFAULT 0,
+                created_at INTEGER DEFAULT (strftime('%s', 'now'))
+            );
+        """)
+        await ensure_columns(db, "live_top_games", {
+            "update_interval": "INTEGER DEFAULT 1",
+            "last_updated": "INTEGER DEFAULT 0"
+        })
 
+        # 4. Guild LFG Settings
         await db.execute("""
-                         CREATE TABLE IF NOT EXISTS user_settings (
-                                                                      user_id INTEGER PRIMARY KEY,
-                                                                      ping_template TEXT
-                         );
-                         """)
+            CREATE TABLE IF NOT EXISTS guild_lfg_settings (
+                guild_id INTEGER PRIMARY KEY,
+                mode TEXT NOT NULL DEFAULT 'all',
+                whitelisted_channels TEXT DEFAULT ''
+            );
+        """)
 
-        await db.execute("""
-                         CREATE TABLE IF NOT EXISTS user_settings (
-                                                                      user_id INTEGER PRIMARY KEY,
-                                                                      ping_template TEXT,
-                                                                      sub_indicator TEXT DEFAULT '⭐'
-                         );
-                         """)
-
-        # Migration check for existing user_settings tables
+        # 5. User Settings Table (Migrates single primary key to composite (user_id, guild_id))
         async with db.execute("PRAGMA table_info(user_settings);") as cursor:
-            columns = [col[1] for col in await cursor.fetchall()]
+            user_settings_info = await cursor.fetchall()
 
-        if "sub_indicator" not in columns:
-            await db.execute("ALTER TABLE user_settings ADD COLUMN sub_indicator TEXT DEFAULT '⭐';")
+        if user_settings_info:
+            pk_count = sum(1 for col in user_settings_info if col[5] > 0)
 
-        await db.execute("""
-                         CREATE TABLE IF NOT EXISTS guild_lfg_settings (
-                                                                           guild_id INTEGER PRIMARY KEY,
-                                                                           mode TEXT NOT NULL DEFAULT 'all',
-                                                                           whitelisted_channels TEXT DEFAULT ''
-                         );
-                         """)
+            # Migrate if schema uses single-column PRIMARY KEY (user_id)
+            if pk_count < 2:
+                print("[DB Setup] Migrating user_settings to composite PRIMARY KEY (user_id, guild_id)...")
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS user_settings_new (
+                        user_id INTEGER NOT NULL,
+                        guild_id INTEGER NOT NULL DEFAULT 0,
+                        quiet_mode INTEGER NOT NULL DEFAULT 0,
+                        ping_template TEXT,
+                        sub_indicator TEXT DEFAULT '⭐',
+                        PRIMARY KEY (user_id, guild_id)
+                    );
+                """)
+                # noinspection SqlResolve
+                await db.execute("""
+                                 INSERT OR IGNORE INTO user_settings_new (user_id, guild_id, quiet_mode, ping_template, sub_indicator)
+                                 SELECT user_id,
+                                        0,
+                                        quiet_mode,
+                                        ping_template,
+                                        COALESCE(sub_indicator, '⭐')
+                                 FROM user_settings;
+                                 """)
+                await db.execute("DROP TABLE user_settings;")
+                # noinspection SqlResolve
+                await db.execute("ALTER TABLE user_settings_new RENAME TO user_settings;")
+                print("[DB Setup] Migration completed successfully.")
+            else:
+                await ensure_columns(db, "user_settings", {
+                    "guild_id": "INTEGER NOT NULL DEFAULT 0",
+                    "quiet_mode": "INTEGER NOT NULL DEFAULT 0",
+                    "ping_template": "TEXT",
+                    "sub_indicator": "TEXT DEFAULT '⭐'"
+                })
+        else:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    user_id INTEGER NOT NULL,
+                    guild_id INTEGER NOT NULL DEFAULT 0,
+                    quiet_mode INTEGER NOT NULL DEFAULT 0,
+                    ping_template TEXT,
+                    sub_indicator TEXT DEFAULT '⭐',
+                    PRIMARY KEY (user_id, guild_id)
+                );
+            """)
 
         await db.commit()
 
+        # 6. Repair missing igdb_games entries for unsubscribe autocomplete
+        async with db.execute(
+            """
+            SELECT DISTINCT s.game_id 
+            FROM subscriptions s 
+            LEFT JOIN igdb_games g ON s.game_id = g.id 
+            WHERE g.id IS NULL
+            """
+        ) as cursor:
+            missing_ids = [row[0] for row in await cursor.fetchall()]
+
+        client_id = os.getenv("TWITCH_CLIENT_ID")
+        access_token = os.getenv("TWITCH_ACCESS_TOKEN")
+
+        if missing_ids and client_id and access_token:
+            headers = {
+                "Client-ID": client_id,
+                "Authorization": f"Bearer {access_token}"
+            }
+            chunk_size = 500
+            for i in range(0, len(missing_ids), chunk_size):
+                chunk = missing_ids[i:i + chunk_size]
+                ids_str = ",".join(str(gid) for gid in chunk)
+                body = f"fields id, name, category, first_release_date; where id = ({ids_str}); limit {chunk_size};"
+
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
+                            if resp.status == 200:
+                                games = await resp.json()
+                                updates = [
+                                    (
+                                        g["id"],
+                                        g["name"],
+                                        int(time.time()),
+                                        g.get("first_release_date"),
+                                        g.get("category", 0)
+                                    )
+                                    for g in games
+                                ]
+                                await db.executemany(
+                                    """
+                                    INSERT OR IGNORE INTO igdb_games (id, name, updated_at, first_release_date, category)
+                                    VALUES (?, ?, ?, ?, ?)
+                                    """,
+                                    updates
+                                )
+                                await db.commit()
+                except Exception as e:
+                    print(f"[DB Setup] Failed to repair orphan subscription: {e}")
+
     print("[DB Setup] Schema checked and migrated safely.")
+
 
 async def auto_migrate_multiplayer_flags():
     client_id = os.getenv("TWITCH_CLIENT_ID")
@@ -199,15 +281,15 @@ async def auto_migrate_multiplayer_flags():
     print("[Auto-Migration] Running database purge of unassigned single-player games...")
     async with aiosqlite.connect(DB_PATH) as db:
         cleanup_query = """
-                        DELETE FROM igdb_games
-                        WHERE id NOT IN (SELECT DISTINCT game_id FROM subscriptions)
-                          AND (
-                            is_multiplayer = 0
-                                OR parent_game_id IS NOT NULL
-                                OR version_parent_id IS NOT NULL
-                                OR category NOT IN (0, 8, 9, 10, 11)
-                            )
-                        """
+            DELETE FROM igdb_games
+            WHERE id NOT IN (SELECT DISTINCT game_id FROM subscriptions)
+              AND (
+                is_multiplayer = 0
+                    OR parent_game_id IS NOT NULL
+                    OR version_parent_id IS NOT NULL
+                    OR category NOT IN (0, 8, 9, 10, 11)
+                )
+        """
         cursor = await db.execute(cleanup_query)
         deleted_count = cursor.rowcount
         await db.commit()

@@ -25,17 +25,18 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 | `/subscribe <game>`                     | Subscribe to notifications for a game (with autocomplete & IGDB lookup).                          |
 | `/unsubscribe <game>`                   | Unsubscribe from active notifications for a game.                                                 |
 | `/user_subscriptions [user] [public]`   | View active game subscriptions for yourself or another member.                                    |
-| `/game_info <game>`                     | Get details, genres, and cover image for a game.                                                  |
+| `/game_info <game> [public]`            | Get details, genres, and cover image for a game.                                                  |
 | `/ping_game <game> [public]`            | Send an LFG ping mentioning all subscribers of a game.                                            |
+| `/quiet_mode [enabled] [scope]`         | Mute/unmute LFG notifications globally or specifically for the current server.                    |
 | `/show_subscribers <game>`              | View subscribers for a game without triggering a ping.                                            |
 | `/top_games [limit] [public]`           | View the most subscribed games on the server.                                                     |
-| `/set_ping_template`                    | Set a custom template for your `/ping_game` notifications.                                        |
+| `/set_ping_template <template>`         | Set a custom template for your `/ping_game` notifications.                                        |
 | `/view_ping_template`                   | View your current custom ping template setting.                                                   |
 | `/reset_ping_template`                  | Reset your custom ping template to default.                                                       |
-| `/set_subscribed_indicator <indicator>` | Set a custom icon/indicator for your subscribed games in autocomplete  (no custom emote support). |
+| `/set_subscribed_indicator <indicator>` | Set a custom icon/indicator for your subscribed games in autocomplete. (no custom emote support). |
 | `/view_subscribed_indicator`            | View your saved autocomplete subscribed game indicator.                                           |
 | `/reset_subscribed_indicator`           | Reset your subscribed game autocomplete indicator back to default (`⭐`).                          |
-| `/delete_my_subscriptions`              | Purge all your active game subscriptions                                                          |
+| `/delete_my_subscriptions`              | Purge all your active game subscriptions.                                                         |
 | `/delete_all_my_data`                   | Purge all your active game subscriptions and user settings/ping templates.                        |
 | `/help [public]`                        | View an interactive command guide.                                                                |
 
