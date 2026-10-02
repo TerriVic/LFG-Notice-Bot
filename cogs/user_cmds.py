@@ -684,8 +684,8 @@ class UserCommands(commands.Cog):
                 if chosen_scope == "global":
                     if enabled is None:
                         async with db.execute(
-                            "SELECT quiet_mode FROM user_settings WHERE user_id = ?",
-                            (user_id,)
+                                "SELECT quiet_mode FROM user_settings WHERE user_id = ? AND guild_id = 0",
+                                (user_id,)
                         ) as cursor:
                             row = await cursor.fetchone()
                             new_state = 1 if (not row or row[0] == 0) else 0
@@ -695,9 +695,9 @@ class UserCommands(commands.Cog):
                     # Update global setting row
                     await db.execute(
                         """
-                        INSERT INTO user_settings (user_id, quiet_mode)
-                        VALUES (?, ?)
-                        ON CONFLICT(user_id) DO UPDATE SET quiet_mode = excluded.quiet_mode
+                        INSERT INTO user_settings (user_id, guild_id, quiet_mode)
+                        VALUES (?, 0, ?)
+                        ON CONFLICT(user_id, guild_id) DO UPDATE SET quiet_mode = excluded.quiet_mode
                         """,
                         (user_id, new_state)
                     )
