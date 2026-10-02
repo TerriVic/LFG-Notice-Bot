@@ -24,6 +24,16 @@ async def ensure_columns(db: aiosqlite.Connection, table_name: str, expected_col
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
+
+        # Table for Guild LFG Channel Settings
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_lfg_settings (
+                  guild_id INTEGER PRIMARY KEY,
+                  mode TEXT NOT NULL DEFAULT 'all', -- 'all', 'none', 'whitelist'
+                  whitelisted_channels TEXT DEFAULT '' -- Comma-separated list of channel IDs
+                         );
+                         """)
+
         # 1. Global User Settings Table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS user_settings (
