@@ -216,15 +216,12 @@ class UserCommands(commands.Cog):
             # Fetch all subscribers and check quiet mode status
             async with db.execute(
                     """
-                    SELECT 
+                    SELECT
                         s.user_id,
-                        CASE WHEN EXISTS (
-                            SELECT 1 FROM user_settings us
-                            WHERE us.user_id = s.user_id
-                              AND us.guild_id IN (0, ?)
-                              AND us.quiet_mode = 1
-                        ) THEN 1 ELSE 0 END AS is_quiet
+                        CASE WHEN (COALESCE(ugs.quiet_mode, us.quiet_mode, 0) = 1) THEN 1 ELSE 0 END AS is_quiet
                     FROM subscriptions s
+                             LEFT JOIN user_settings us ON s.user_id = us.user_id
+                             LEFT JOIN user_guild_settings ugs ON s.user_id = ugs.user_id AND ugs.guild_id = ?
                     WHERE s.game_id = ?
                       AND s.user_id != ?
                     """,
@@ -233,7 +230,7 @@ class UserCommands(commands.Cog):
                 rows = await cursor.fetchall()
 
             async with db.execute(
-                    "SELECT ping_template FROM user_settings WHERE user_id = ? AND guild_id = 0",
+                    "SELECT ping_template FROM user_settings WHERE user_id = ?",
                     (interaction.user.id,)
             ) as cursor:
                 template_row = await cursor.fetchone()
@@ -302,9 +299,9 @@ class UserCommands(commands.Cog):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 """
-                INSERT INTO user_settings (user_id, guild_id, ping_template)
-                VALUES (?, 0, ?)
-                ON CONFLICT(user_id, guild_id) DO UPDATE SET ping_template = excluded.ping_template
+                INSERT INTO user_settings (user_id, ping_template)
+                VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET ping_template = excluded.ping_template
                 """,
                 (interaction.user.id, final_template)
             )
@@ -334,7 +331,7 @@ class UserCommands(commands.Cog):
     async def view_ping_template(self, interaction: discord.Interaction):
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
-                    "SELECT ping_template FROM user_settings WHERE user_id = ? AND guild_id = 0",
+                    "SELECT ping_template FROM user_settings WHERE user_id = ?",
                     (interaction.user.id,)
             ) as cursor:
                 row = await cursor.fetchone()
@@ -371,7 +368,7 @@ class UserCommands(commands.Cog):
         async def do_reset(_inter: discord.Interaction):
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
-                    "UPDATE user_settings SET ping_template = NULL WHERE user_id = ? AND guild_id = 0",
+                    "UPDATE user_settings SET ping_template = NULL WHERE user_id = ?",
                     (interaction.user.id,)
                 )
                 await db.commit()
@@ -596,9 +593,9 @@ class UserCommands(commands.Cog):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 """
-                INSERT INTO user_settings (user_id, guild_id, sub_indicator)
-                VALUES (?, 0, ?)
-                ON CONFLICT(user_id, guild_id) DO UPDATE SET sub_indicator = excluded.sub_indicator
+                INSERT INTO user_settings (user_id, sub_indicator)
+                VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET sub_indicator = excluded.sub_indicator
                 """,
                 (interaction.user.id, clean_indicator)
             )
@@ -614,7 +611,7 @@ class UserCommands(commands.Cog):
     async def view_subscribed_indicator(self, interaction: discord.Interaction):
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
-                    "SELECT sub_indicator FROM user_settings WHERE user_id = ? AND guild_id = 0",
+                    "SELECT sub_indicator FROM user_settings WHERE user_id = ?",
                     (interaction.user.id,)
             ) as cursor:
                 row = await cursor.fetchone()
@@ -633,9 +630,9 @@ class UserCommands(commands.Cog):
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
                     """
-                    INSERT INTO user_settings (user_id, guild_id, sub_indicator)
-                    VALUES (?, 0, '⭐')
-                    ON CONFLICT(user_id, guild_id) DO UPDATE SET sub_indicator = '⭐'
+                    INSERT INTO user_settings (user_id, sub_indicator)
+                    VALUES (?, '⭐')
+                    ON CONFLICT(user_id) DO UPDATE SET sub_indicator = '⭐'
                     """,
                     (interaction.user.id,)
                 )
@@ -670,7 +667,6 @@ class UserCommands(commands.Cog):
         enabled: bool = None,
         scope: app_commands.Choice[str] = None
     ):
-        # 1. Immediately defer response
         await interaction.response.defer(ephemeral=True)
 
         user_id = interaction.user.id
@@ -683,42 +679,54 @@ class UserCommands(commands.Cog):
             )
             return
 
-        guild_id = interaction.guild_id if chosen_scope == "server" else 0
-
         try:
             async with aiosqlite.connect(DB_PATH) as db:
-                if enabled is None:
-                    # Query existing state for this scope
-                    async with db.execute(
-                        "SELECT quiet_mode FROM user_settings WHERE user_id = ? AND guild_id = ?",
-                        (user_id, guild_id)
-                    ) as cursor:
-                        row = await cursor.fetchone()
-                        current_state = row[0] if row else 0
-                        new_state = 1 if current_state == 0 else 0
-                else:
-                    new_state = 1 if enabled else 0
-
                 if chosen_scope == "global":
-                    # Update quiet_mode across all server entries for this user
-                    await db.execute(
-                        "UPDATE user_settings SET quiet_mode = ? WHERE user_id = ?",
-                        (new_state, user_id)
-                    )
-                    # Ensure global row (guild_id = 0) exists
+                    if enabled is None:
+                        async with db.execute(
+                            "SELECT quiet_mode FROM user_settings WHERE user_id = ?",
+                            (user_id,)
+                        ) as cursor:
+                            row = await cursor.fetchone()
+                            new_state = 1 if (not row or row[0] == 0) else 0
+                    else:
+                        new_state = 1 if enabled else 0
+
+                    # Update global setting row
                     await db.execute(
                         """
-                        INSERT INTO user_settings (user_id, guild_id, quiet_mode) 
-                        VALUES (?, 0, ?)
-                        ON CONFLICT(user_id, guild_id) DO UPDATE SET quiet_mode = excluded.quiet_mode
+                        INSERT INTO user_settings (user_id, quiet_mode)
+                        VALUES (?, ?)
+                        ON CONFLICT(user_id) DO UPDATE SET quiet_mode = excluded.quiet_mode
                         """,
                         (user_id, new_state)
                     )
+
+                    # Optionally clear server-specific overrides so everything aligns globally
+                    await db.execute("DELETE FROM user_guild_settings WHERE user_id = ?", (user_id,))
+
                 else:
-                    # Native UPSERT targeting composite key (user_id, guild_id) for specific server
+                    guild_id = interaction.guild_id
+                    if enabled is None:
+                        # Check per-server override first, falling back to global setting
+                        async with db.execute(
+                            """
+                            SELECT COALESCE(ugs.quiet_mode, us.quiet_mode, 0)
+                            FROM (SELECT ? AS u_id)
+                            LEFT JOIN user_settings us ON us.user_id = u_id
+                            LEFT JOIN user_guild_settings ugs ON ugs.user_id = u_id AND ugs.guild_id = ?
+                            """,
+                            (user_id, guild_id)
+                        ) as cursor:
+                            row = await cursor.fetchone()
+                            new_state = 1 if (not row or row[0] == 0) else 0
+                    else:
+                        new_state = 1 if enabled else 0
+
+                    # Insert/update server override
                     await db.execute(
                         """
-                        INSERT INTO user_settings (user_id, guild_id, quiet_mode) 
+                        INSERT INTO user_guild_settings (user_id, guild_id, quiet_mode)
                         VALUES (?, ?, ?)
                         ON CONFLICT(user_id, guild_id) DO UPDATE SET quiet_mode = excluded.quiet_mode
                         """,
@@ -736,7 +744,6 @@ class UserCommands(commands.Cog):
             )
 
         except Exception as e:
-            # Catch exceptions so the interaction completes instead of hanging indefinitely
             await interaction.followup.send(
                 f"❌ An error occurred while updating quiet mode: `{e}`",
                 ephemeral=True
@@ -813,7 +820,9 @@ class UserCommands(commands.Cog):
                     f"• {fmt('config', 'edit_top_games')} `<message>` `[limit]` `[interval]` — Edit tracker settings or force a refresh.\n"
                     f"• {fmt('config', 'force_update_top_games')} `<message>` — Force an immediate refresh on a live tracker.\n"
                     f"• {fmt('config', 'remove_top_games')} `<message>` — Stop tracking and delete a live top games message.\n"
-                    f"• {fmt('config', 'set_lfg_channels')} `<mode>` `[channels]` — Restrict, allow, or disable `/ping_game` server-wide.\n"
+                    f"• {fmt('config', 'set_lfg_channels')} `<mode> [channel]` — Allow all channels or add whitelisted channels.\n"
+                    f"• {fmt('config', 'remove_lfg_channels')} `<mode> [channel]` — Disable all channels or remove a whitelisted channel.\n"
+                    f"• {fmt('config', 'view_lfg_channels')} — View current LFG channel configuration.\n"
                     f"• {fmt('config', 'server_overview')} — View subscription details for members in the server."
                 ),
                 inline=False

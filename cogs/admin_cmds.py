@@ -11,8 +11,10 @@ from database import DB_PATH
 from utils import (
     format_interval,
     get_bot_owner_id,
-    GenericConfirmationView, autocomplete_text_channels
+    GenericConfirmationView, autocomplete_set_lfg_channels,
+    autocomplete_whitelisted_channels_only
 )
+
 
 def is_owner_or_moderator():
     async def predicate(interaction: discord.Interaction) -> bool:
@@ -383,60 +385,60 @@ class AdminCommands(commands.Cog):
         for extra_embed in embeds[1:]:
             await interaction.followup.send(embed=extra_embed, ephemeral=True)
 
+    # --- LFG Channel Management Commands ---
+
     @mod_group.command(
         name="set_lfg_channels",
-        description="Configure which channels allow LFG notifications"
+        description="Allow all channels or set/add specific channels to the LFG whitelist"
     )
     @app_commands.describe(
-        mode="Select channel access rule",
-        channels="Search and select channels to whitelist (only needed if mode is 'Whitelist Specific Channels')"
+        mode="Select channel access mode",
+        channel="Select a channel to enable/whitelist (marked with ✅ if already whitelisted)"
     )
     @app_commands.choices(mode=[
         app_commands.Choice(name="Allow All Channels", value="all"),
-        app_commands.Choice(name="Blacklist/Disable All Channels", value="none"),
         app_commands.Choice(name="Whitelist Specific Channels", value="whitelist")
     ])
-    @app_commands.autocomplete(channels=autocomplete_text_channels)
+    @app_commands.autocomplete(channel=autocomplete_set_lfg_channels)
     @is_owner_or_moderator()
     async def set_lfg_channels(
             self,
             interaction: discord.Interaction,
             mode: app_commands.Choice[str],
-            channels: typing.Optional[str] = None
+            channel: typing.Optional[str] = None
     ):
         if not interaction.guild:
             await interaction.response.send_message("This command must be run inside a server.", ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True)
-
         selected_mode = mode.value
-        channel_ids_str = ""
-
-        if selected_mode == "whitelist":
-            if not channels:
-                await interaction.followup.send(
-                    "❌ You must select or specify at least one channel when using **Whitelist Specific Channels**.",
-                    ephemeral=True
-                )
-                return
-
-            # Extract valid channel IDs (handles selected ID or channel mentions)
-            extracted_ids = set()
-            for ch in interaction.guild.text_channels:
-                if str(ch.id) in channels or ch.mention in channels or ch.name in channels:
-                    extracted_ids.add(str(ch.id))
-
-            if not extracted_ids:
-                await interaction.followup.send(
-                    "❌ No valid text channels were found in your input. Please select a channel from autocomplete.",
-                    ephemeral=True
-                )
-                return
-
-            channel_ids_str = ",".join(extracted_ids)
 
         async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                    "SELECT whitelisted_channels FROM guild_lfg_settings WHERE guild_id = ?",
+                    (interaction.guild.id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            existing_channels = set(row[0].split(",")) if row and row[0] else set()
+
+            if selected_mode == "whitelist":
+                if channel and channel != "__NONE__":
+                    existing_channels.add(channel)
+
+                if not existing_channels:
+                    await interaction.followup.send(
+                        "❌ You must select at least one channel when setting mode to **Whitelist Specific Channels**.",
+                        ephemeral=True
+                    )
+                    return
+
+                channel_str = ",".join(existing_channels)
+            else:
+                # Mode 'all': retain recorded whitelist string in case mode changes back
+                channel_str = ",".join(existing_channels)
+
             await db.execute(
                 """
                 INSERT INTO guild_lfg_settings (guild_id, mode, whitelisted_channels)
@@ -445,17 +447,141 @@ class AdminCommands(commands.Cog):
                                                     mode = excluded.mode,
                                                     whitelisted_channels = excluded.whitelisted_channels
                 """,
-                (interaction.guild.id, selected_mode, channel_ids_str)
+                (interaction.guild.id, selected_mode, channel_str)
             )
             await db.commit()
 
         if selected_mode == "all":
             await interaction.followup.send("✅ LFG notifications are now allowed in **all text channels**.", ephemeral=True)
-        elif selected_mode == "none":
-            await interaction.followup.send("🚫 LFG notifications have been **disabled across all channels** for this server.", ephemeral=True)
         else:
-            formatted_mentions = " ".join(f"<#{cid}>" for cid in channel_ids_str.split(","))
-            await interaction.followup.send(f"✅ LFG notifications restricted to: {formatted_mentions}", ephemeral=True)
+            formatted_mentions = " ".join(f"<#{cid}>" for cid in existing_channels if cid)
+            await interaction.followup.send(f"✅ LFG notifications set to **Whitelist**. Allowed channels: {formatted_mentions}", ephemeral=True)
+
+
+    @mod_group.command(
+        name="remove_lfg_channels",
+        description="Disable all channels or remove a specific channel from the LFG whitelist"
+    )
+    @app_commands.describe(
+        mode="Select action to disable all channels or remove a specific channel",
+        channel="Select a whitelisted channel to remove"
+    )
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="Disable/Blacklist All Channels", value="none"),
+        app_commands.Choice(name="Disable/Remove Specific Channel", value="remove_specific")
+    ])
+    @app_commands.autocomplete(channel=autocomplete_whitelisted_channels_only)
+    @is_owner_or_moderator()
+    async def remove_lfg_channels(
+            self,
+            interaction: discord.Interaction,
+            mode: app_commands.Choice[str],
+            channel: typing.Optional[str] = None
+    ):
+        if not interaction.guild:
+            await interaction.response.send_message("This command must be run inside a server.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        selected_mode = mode.value
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                    "SELECT mode, whitelisted_channels FROM guild_lfg_settings WHERE guild_id = ?",
+                    (interaction.guild.id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            existing_channels = set(row[1].split(",")) if row and row[1] else set()
+
+            if selected_mode == "none":
+                # Set mode to 'none' across server
+                await db.execute(
+                    """
+                    INSERT INTO guild_lfg_settings (guild_id, mode, whitelisted_channels)
+                    VALUES (?, 'none', ?)
+                    ON CONFLICT(guild_id) DO UPDATE SET mode = 'none'
+                    """,
+                    (interaction.guild.id, ",".join(existing_channels))
+                )
+                await db.commit()
+
+                await interaction.followup.send("🚫 LFG notifications have been **disabled across all channels** for this server.", ephemeral=True)
+                return
+
+            # Removing a specific channel from the whitelist
+            if not channel or channel == "__NONE__":
+                await interaction.followup.send("❌ Please select a valid whitelisted channel to remove.", ephemeral=True)
+                return
+
+            if channel not in existing_channels:
+                await interaction.followup.send("⚠️ The selected channel is not currently in the whitelist.", ephemeral=True)
+                return
+
+            existing_channels.remove(channel)
+            new_channel_str = ",".join(existing_channels)
+
+            await db.execute(
+                "UPDATE guild_lfg_settings SET whitelisted_channels = ? WHERE guild_id = ?",
+                (new_channel_str, interaction.guild.id)
+            )
+            await db.commit()
+
+        if existing_channels:
+            remaining_mentions = " ".join(f"<#{cid}>" for cid in existing_channels if cid)
+            await interaction.followup.send(
+                f"🗑️ Removed <#{channel}> from LFG whitelist.\n📌 Remaining allowed channels: {remaining_mentions}",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                f"🗑️ Removed <#{channel}> from LFG whitelist.\n⚠️ The whitelist is now empty.",
+                ephemeral=True
+            )
+
+    @mod_group.command(
+        name="view_lfg_channels",
+        description="View current LFG notification channel configurations for this server"
+    )
+    @is_owner_or_moderator()
+    async def view_lfg_channels(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("This command must be run inside a server.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                    "SELECT mode, whitelisted_channels FROM guild_lfg_settings WHERE guild_id = ?",
+                    (interaction.guild.id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+
+        if not row:
+            await interaction.followup.send("⚙️ LFG channel settings are currently set to **default (Allow All Channels)**.", ephemeral=True)
+            return
+
+        mode, channels_str = row
+        channel_ids = [cid for cid in channels_str.split(",") if cid]
+
+        if mode == "all":
+            mode_desc = "✅ **Allow All Channels** (LFG notifications allowed everywhere)"
+        elif mode == "none":
+            mode_desc = "🚫 **Disabled Server-Wide** (No LFG notifications permitted)"
+        else:
+            mode_desc = "🎯 **Whitelist Mode** (LFG notifications restricted to specific channels)"
+
+        channels_desc = " ".join(f"<#{cid}>" for cid in channel_ids) if channel_ids else "*None configured*"
+
+        embed = discord.Embed(
+            title=f"⚙️ LFG Channel Settings for {interaction.guild.name}",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Current Mode", value=mode_desc, inline=False)
+        embed.add_field(name="Whitelisted Channels", value=channels_desc, inline=False)
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

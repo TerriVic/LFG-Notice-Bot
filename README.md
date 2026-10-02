@@ -47,7 +47,9 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 | `/config edit_top_games <message> [limit] [interval]` | Update display limit or interval settings (e.g., `0.5` for 30m), or leave options empty to force an immediate refresh.                                             |
 | `/config force_update_top_games <message>`            | Force an immediate refresh on an active live tracker message.                                                                                                      |
 | `/config remove_top_games <message>`                  | Stop tracking and delete an active live top games message.                                                                                                         |
-| `/config set_lfg_channels <mode> [channels]`          | Restrict LFG pings (`/ping_game`) to specific whitelisted channels, allow them server-wide, or disable them server-wide.                                           |
+| `/config set_lfg_channels <mode> [channel]`           | Configure LFG mode (`all` or `whitelist`) and add channels marked with `✅`.                                                                                        |
+| `/config remove_lfg_channels <mode> [channel]`        | Set mode to disable LFG server-wide (`none`) or remove specific whitelisted channels.                                                                              |
+| `/config view_lfg_channels`                           | View current LFG channel configuration embed.                                                                                                                      |
 | `/config server_overview`                             | View subscription details for members in the server where the command is called.                                                                                   |                                                                                  |
 
 ---

@@ -209,7 +209,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
         sub_icon = "⭐ "
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
-                    "SELECT sub_indicator FROM user_settings WHERE user_id = ? AND guild_id = 0",
+                    "SELECT sub_indicator FROM user_settings WHERE user_id = ?",
                     (interaction.user.id,)
             ) as cursor:
                 indicator_row = await cursor.fetchone()
@@ -572,6 +572,68 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
 
     except (discord.NotFound, discord.HTTPException):
         return []
+
+async def autocomplete_set_lfg_channels(interaction: discord.Interaction, current: str):
+    if not interaction.guild:
+        return []
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+                "SELECT whitelisted_channels FROM guild_lfg_settings WHERE guild_id = ?",
+                (interaction.guild.id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+    whitelisted_set = set(row[0].split(",")) if row and row[0] else set()
+
+    choices = []
+    clean_current = current.lower().strip().lstrip("#")
+
+    for channel in interaction.guild.text_channels:
+        is_whitelisted = str(channel.id) in whitelisted_set
+
+        # Add visual indicator (✅) for whitelisted channels
+        icon = "✅ " if is_whitelisted else ""
+        label = f"{icon}#{channel.name}"
+
+        if not clean_current or clean_current in channel.name.lower() or clean_current in str(channel.id):
+            choices.append(app_commands.Choice(name=label[:100], value=str(channel.id)))
+
+    return choices[:25]
+
+
+async def autocomplete_whitelisted_channels_only(interaction: discord.Interaction, current: str):
+    if not interaction.guild:
+        return []
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+                "SELECT whitelisted_channels FROM guild_lfg_settings WHERE guild_id = ?",
+                (interaction.guild.id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+    if not row or not row[0]:
+        return [app_commands.Choice(name="No channels currently whitelisted", value="__NONE__")]
+
+    whitelisted_ids = set(cid for cid in row[0].split(",") if cid)
+
+    if not whitelisted_ids:
+        return [app_commands.Choice(name="No channels currently whitelisted", value="__NONE__")]
+
+    choices = []
+    clean_current = current.lower().strip().lstrip("#")
+
+    for channel in interaction.guild.text_channels:
+        if str(channel.id) in whitelisted_ids:
+            label = f"#{channel.name}"
+            if not clean_current or clean_current in channel.name.lower() or clean_current in str(channel.id):
+                choices.append(app_commands.Choice(name=label[:100], value=str(channel.id)))
+
+    if not choices:
+        return [app_commands.Choice(name="No matching whitelisted channels found", value="__NONE__")]
+
+    return choices[:25]
 
 async def autocomplete_text_channels(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     if not interaction.guild:
