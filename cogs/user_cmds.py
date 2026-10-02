@@ -820,7 +820,9 @@ class UserCommands(commands.Cog):
                     f"• {fmt('config', 'edit_top_games')} `<message>` `[limit]` `[interval]` — Edit tracker settings or force a refresh.\n"
                     f"• {fmt('config', 'force_update_top_games')} `<message>` — Force an immediate refresh on a live tracker.\n"
                     f"• {fmt('config', 'remove_top_games')} `<message>` — Stop tracking and delete a live top games message.\n"
-                    f"• {fmt('config', 'set_lfg_channels')} `<mode>` `[channels]` — Restrict, allow, or disable `/ping_game` server-wide.\n"
+                    f"• {fmt('config', 'set_lfg_channels')} `<mode> [channel]` — Allow all channels or add whitelisted channels.\n"
+                    f"• {fmt('config', 'remove_lfg_channels')} `<mode> [channel]` — Disable all channels or remove a whitelisted channel.\n"
+                    f"• {fmt('config', 'view_lfg_channels')} — View current LFG channel configuration.\n"
                     f"• {fmt('config', 'server_overview')} — View subscription details for members in the server."
                 ),
                 inline=False
