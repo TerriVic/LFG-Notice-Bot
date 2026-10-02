@@ -209,7 +209,7 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
         sub_icon = "⭐ "
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
-                    "SELECT sub_indicator FROM user_settings WHERE user_id = ? AND guild_id = 0",
+                    "SELECT sub_indicator FROM user_settings WHERE user_id = ?",
                     (interaction.user.id,)
             ) as cursor:
                 indicator_row = await cursor.fetchone()
