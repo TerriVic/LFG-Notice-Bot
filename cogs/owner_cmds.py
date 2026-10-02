@@ -1,3 +1,5 @@
+import os
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -321,6 +323,36 @@ class OwnerCommands(commands.Cog):
         await interaction.followup.send(embed=embeds[0], ephemeral=True)
         for extra_embed in embeds[1:]:
             await interaction.followup.send(embed=extra_embed, ephemeral=True)
+
+    @commands.command(name="getdb", aliases=["download_db", "fetch_db"])
+    async def send_database_file(self, ctx: commands.Context):
+        # Ensure only the bot owner can request the file
+        if ctx.author.id != get_bot_owner_id():
+            return
+
+        if not os.path.exists(DB_PATH):
+            await ctx.send("❌ Database file not found.")
+            return
+
+        try:
+            # Send as an attachment via DM or to the channel
+            db_file = discord.File(DB_PATH, filename="db.sqlite")
+
+            # Sending via Direct Message (recommended to keep channel clean)
+            await ctx.author.send("📁 Here is the current copy of the SQLite database:", file=db_file)
+
+            # Confirm in the channel where command was invoked
+            if ctx.guild:
+                await ctx.send("📬 Check your Direct Messages! Sent the database file.", delete_after=10)
+
+        except discord.Forbidden:
+            # Fallback if the user's DMs are closed
+            await ctx.send("⚠️ Couldn't DM you. Sending directly in channel...", delete_after=5)
+            db_file = discord.File(DB_PATH, filename="db.sqlite")
+            await ctx.send(file=db_file)
+
+        except Exception as e:
+            await ctx.send(f"❌ Failed to send database file:\n```py\n{e}\n```")
 
 async def setup(bot):
     await bot.add_cog(OwnerCommands(bot))
