@@ -22,12 +22,15 @@ def is_owner_or_moderator():
         if interaction.user.id == get_bot_owner_id():
             return True
 
-        # 2. Allow Server Moderators in their guild
+            # 2. Allow Server Moderators in their guild
         if interaction.permissions and interaction.permissions.manage_messages:
             return True
 
         return False
-    return app_commands.check(predicate)
+
+    check_decor = app_commands.check(predicate)
+    check_decor.predicate = predicate  # Expose predicate for testing
+    return check_decor
 
 async def autocomplete_live_messages(interaction: discord.Interaction, current: str):
     if not interaction.guild:

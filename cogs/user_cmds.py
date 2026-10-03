@@ -208,7 +208,7 @@ class UserCommands(commands.Cog):
                 row = await cursor.fetchone()
 
             if not row:
-                await interaction.followup.send("Game not found.")
+                await interaction.followup.send("Game not found.", ephemeral=True)
                 return
 
             game_id, official_name = await resolve_to_base_game(row[0], row[1])
@@ -299,9 +299,9 @@ class UserCommands(commands.Cog):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 """
-                INSERT INTO user_settings (user_id, ping_template)
-                VALUES (?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET ping_template = excluded.ping_template
+                INSERT INTO user_settings (user_id, guild_id, ping_template)
+                VALUES (?, 0, ?)
+                ON CONFLICT(user_id, guild_id) DO UPDATE SET ping_template = excluded.ping_template
                 """,
                 (interaction.user.id, final_template)
             )
@@ -593,15 +593,14 @@ class UserCommands(commands.Cog):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 """
-                INSERT INTO user_settings (user_id, sub_indicator)
-                VALUES (?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET sub_indicator = excluded.sub_indicator
+                INSERT INTO user_settings (user_id, guild_id, sub_indicator)
+                VALUES (?, 0, ?)
+                ON CONFLICT(user_id, guild_id) DO UPDATE SET sub_indicator = excluded.sub_indicator
                 """,
                 (interaction.user.id, clean_indicator)
             )
             await db.commit()
-
-        await interaction.response.send_message(
+            await interaction.response.send_message(
             f"✅ **Subscribed game indicator updated!**\n\n"
             f"Subscribed games in autocomplete will now show: `{clean_indicator} Game Title`",
             ephemeral=True
@@ -630,9 +629,9 @@ class UserCommands(commands.Cog):
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
                     """
-                    INSERT INTO user_settings (user_id, sub_indicator)
-                    VALUES (?, '⭐')
-                    ON CONFLICT(user_id) DO UPDATE SET sub_indicator = '⭐'
+                    INSERT INTO user_settings (user_id, guild_id, sub_indicator)
+                    VALUES (?, 0, '⭐')
+                    ON CONFLICT(user_id, guild_id) DO UPDATE SET sub_indicator = '⭐'
                     """,
                     (interaction.user.id,)
                 )

@@ -195,9 +195,10 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
 
         # Safely resolve target user if passed via command interaction namespace
         user_id = interaction.user.id
-        if hasattr(interaction, "namespace") and getattr(interaction.namespace, "user", None):
-            target_user = interaction.namespace.user
-            if hasattr(target_user, "id"):
+        namespace = getattr(interaction, "namespace", None)
+        if namespace and getattr(namespace, "user", None):
+            target_user = namespace.user
+            if hasattr(target_user, "id") and isinstance(target_user.id, int):
                 user_id = target_user.id
 
         # Only boost subscribed games to the top if the command is /ping_game
