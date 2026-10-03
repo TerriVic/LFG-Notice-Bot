@@ -252,3 +252,122 @@ async def test_send_database_file(mock_file, mock_exists, owner_cog, mock_ctx, p
     mock_ctx.author.send.assert_awaited_once_with("📁 Here is the current copy of the SQLite database:", file="mock_db_file")
     mock_ctx.send.assert_awaited_once()
     assert "Check your Direct Messages!" in mock_ctx.send.call_args[0][0]
+
+@pytest.mark.asyncio
+@patch('cogs.owner_cmds.GenericConfirmationView')
+async def test_admin_delete_user_subscriptions(mock_view_class, owner_cog, mock_interaction, mock_db_connect):
+    """Test admin_delete_user_subscriptions prompts confirmation and deletes user subscriptions from DB on confirm."""
+    mock_db, mock_cursor = mock_db_connect
+    target_user = AsyncMock()
+    target_user.id = 555
+    target_user.mention = "<@555>"
+
+    await owner_cog.admin_delete_user_subscriptions.callback(owner_cog, mock_interaction, user=target_user)
+
+    # 1. Verify confirmation message was sent with view
+    mock_interaction.response.send_message.assert_awaited_once()
+
+    # 2. Extract the created view kwargs and invoke its on_confirm callback
+    created_view_kwargs = mock_view_class.call_args.kwargs
+    on_confirm_callback = created_view_kwargs['on_confirm']
+
+    await on_confirm_callback(mock_interaction)
+
+    # 3. Verify the correct SQL delete statement was executed for the user
+    db_calls = mock_db.execute.call_args_list
+    delete_call = next(call for call in db_calls if "DELETE FROM subscriptions" in call.args[0])
+    assert delete_call.args[1] == (555,)
+
+
+@pytest.mark.asyncio
+async def test_reload_cog_reload_failure(owner_cog, mock_ctx):
+    """Test reload_cog handles general exceptions during reload_extension gracefully."""
+    mock_ctx.bot.reload_extension.side_effect = Exception("Syntax error in extension")
+
+    await owner_cog.reload_cog(owner_cog, mock_ctx, cog_name="bad_cog.py")
+
+    mock_ctx.bot.reload_extension.assert_awaited_once_with("cogs.bad_cog")
+    mock_ctx.send.assert_awaited_once()
+    assert "❌ Failed to reload `cogs.bad_cog`" in mock_ctx.send.call_args[0][0]
+    assert "Syntax error in extension" in mock_ctx.send.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_reload_cog_fallback_load_failure(owner_cog, mock_ctx):
+    """Test reload_cog handles exceptions when fallback load_extension also fails."""
+    mock_ctx.bot.reload_extension.side_effect = commands.ExtensionNotLoaded(name="cogs.nonexistent")
+    mock_ctx.bot.load_extension.side_effect = Exception("Failed to load module")
+
+    await owner_cog.reload_cog(owner_cog, mock_ctx, cog_name="nonexistent")
+
+    mock_ctx.bot.reload_extension.assert_awaited_once_with("cogs.nonexistent")
+    mock_ctx.bot.load_extension.assert_awaited_once_with("cogs.nonexistent")
+
+    mock_ctx.send.assert_awaited_once()
+    assert "❌ Failed to load `cogs.nonexistent`" in mock_ctx.send.call_args[0][0]
+    assert "Failed to load module" in mock_ctx.send.call_args[0][0]
+
+@pytest.mark.asyncio
+async def test_delete_bot_message_custom_channel_fetch(owner_cog, mock_ctx, patch_owner_id):
+    """Test delete_bot_message fetches and deletes from a custom channel ID via fetch_channel fallback."""
+    mock_ctx.bot.get_channel.return_value = None  # Force cache miss
+    mock_custom_channel = AsyncMock(spec=discord.TextChannel)
+    mock_ctx.bot.fetch_channel.return_value = mock_custom_channel
+
+    mock_target_msg = AsyncMock()
+    mock_target_msg.author.id = owner_cog.bot.user.id
+    mock_custom_channel.fetch_message.return_value = mock_target_msg
+
+    await owner_cog.delete_bot_message(owner_cog, mock_ctx, message_id=111, channel_id=222)
+
+    mock_ctx.bot.fetch_channel.assert_awaited_once_with(222)
+    mock_custom_channel.fetch_message.assert_awaited_once_with(111)
+    mock_target_msg.delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_delete_bot_message_channel_not_found(owner_cog, mock_ctx, patch_owner_id):
+    """Test delete_bot_message handles missing/inaccessible custom channels gracefully."""
+    mock_ctx.bot.get_channel.return_value = None
+    mock_ctx.bot.fetch_channel.side_effect = discord.NotFound(MagicMock(), "Not found")
+
+    await owner_cog.delete_bot_message(owner_cog, mock_ctx, message_id=111, channel_id=222)
+
+    mock_ctx.send.assert_awaited_once()
+    assert "Channel not found or bot lacks access" in mock_ctx.send.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_delete_bot_message_not_sent_by_bot(owner_cog, mock_ctx, patch_owner_id):
+    """Test delete_bot_message warns and aborts if the target message was authored by another user."""
+    mock_target_msg = AsyncMock()
+    mock_target_msg.author.id = 99999  # Some other user ID, not bot's ID
+    mock_ctx.channel.fetch_message.return_value = mock_target_msg
+
+    await owner_cog.delete_bot_message(owner_cog, mock_ctx, message_id=111)
+
+    mock_target_msg.delete.assert_not_called()
+    mock_ctx.send.assert_awaited_once()
+    assert "Specified message was not sent by this bot" in mock_ctx.send.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_delete_bot_message_not_found_exception(owner_cog, mock_ctx, patch_owner_id):
+    """Test delete_bot_message handles discord.NotFound when looking up the target message ID."""
+    mock_ctx.channel.fetch_message.side_effect = discord.NotFound(MagicMock(), "Not found")
+
+    await owner_cog.delete_bot_message(owner_cog, mock_ctx, message_id=111)
+
+    mock_ctx.send.assert_awaited_once()
+    assert "Message not found" in mock_ctx.send.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_delete_bot_message_forbidden_exception(owner_cog, mock_ctx, patch_owner_id):
+    """Test delete_bot_message handles discord.Forbidden permissions errors."""
+    mock_ctx.channel.fetch_message.side_effect = discord.Forbidden(MagicMock(), "Forbidden")
+
+    await owner_cog.delete_bot_message(owner_cog, mock_ctx, message_id=111)
+
+    mock_ctx.send.assert_awaited_once()
+    assert "Missing permissions to read or delete messages" in mock_ctx.send.call_args[0][0]

@@ -11,7 +11,8 @@ from discord.ext import commands, tasks
 from database import DB_PATH
 from utils import (
     extract_id,
-    GENERIC_DLC_PATTERN, format_interval
+    GENERIC_DLC_PATTERN, format_interval,
+    format_command_mention as fmt
 )
 
 
@@ -78,6 +79,7 @@ async def refresh_live_top_games(
 
             interval_str = format_interval(update_interval)
             description += f"\n\n*Last updated <t:{now}:R> • Schedule: {interval_str}*"
+            description += f"\n-# Tip: Use {fmt(bot, 'subscribe')} to subscribe to a game!"
 
             embed = discord.Embed(
                 title=f"📊 Live Top {entry_limit} Games in {guild.name}",

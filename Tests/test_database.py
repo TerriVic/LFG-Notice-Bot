@@ -153,3 +153,62 @@ async def test_auto_migrate_multiplayer_flags_and_cleanup(mock_post, mock_getenv
     assert 101 in remaining_ids
     assert 202 not in remaining_ids  # Pruned during cleanup phase
     assert remaining_games[0][1] == 1  # Flag updated to 1
+
+@pytest.mark.asyncio
+@patch("os.getenv")
+@patch("aiohttp.ClientSession.post")
+async def test_init_db_repairs_orphan_subscriptions(mock_post, mock_getenv, tmp_path, monkeypatch):
+    """Test that init_db detects orphan subscriptions and fetches missing game data from IGDB."""
+    test_db_path = tmp_path / "test_orphan_repair.sqlite"
+    monkeypatch.setattr("database.DB_PATH", str(test_db_path))
+
+    # Mock IGDB API credentials
+    mock_getenv.side_effect = lambda key, default=None: {
+        "TWITCH_CLIENT_ID": "fake_client_id",
+        "TWITCH_ACCESS_TOKEN": "fake_token",
+    }.get(key, default)
+
+    # Pre-populate database with tables and an orphan subscription (game_id 999 has no entry in igdb_games)
+    async with aiosqlite.connect(test_db_path) as db:
+        await db.execute("""
+                         CREATE TABLE igdb_games (
+                                                     id INTEGER PRIMARY KEY,
+                                                     name TEXT NOT NULL,
+                                                     updated_at INTEGER NOT NULL,
+                                                     first_release_date INTEGER DEFAULT NULL,
+                                                     category INTEGER DEFAULT 0,
+                                                     parent_game_id INTEGER DEFAULT NULL,
+                                                     version_parent_id INTEGER DEFAULT NULL,
+                                                     is_multiplayer INTEGER DEFAULT 0
+                         );
+                         """)
+        await db.execute("""
+                         CREATE TABLE subscriptions (
+                                                        user_id INTEGER NOT NULL,
+                                                        game_id INTEGER NOT NULL,
+                                                        PRIMARY KEY (user_id, game_id)
+                         );
+                         """)
+        await db.execute("INSERT INTO subscriptions (user_id, game_id) VALUES (123, 999);")
+        await db.commit()
+
+    # Mock IGDB API return payload for the missing game ID (999)
+    mock_response = AsyncMock()
+    mock_response.status = 200
+    mock_response.json = AsyncMock(return_value=[
+        {"id": 999, "name": "Orphaned Game", "category": 0, "first_release_date": 1600000000}
+    ])
+    mock_post.return_value.__aenter__.return_value = mock_response
+
+    # Run init_db which will trigger table creation, migrations, and the orphan repair step
+    await init_db()
+
+    # Verify that the missing game was successfully fetched from the mocked API and inserted into igdb_games
+    async with aiosqlite.connect(test_db_path) as db:
+        async with db.execute("SELECT id, name, first_release_date FROM igdb_games WHERE id = 999;") as cursor:
+            row = await cursor.fetchone()
+
+    assert row is not None
+    assert row[0] == 999
+    assert row[1] == "Orphaned Game"
+    assert row[2] == 1600000000
