@@ -208,7 +208,7 @@ class UserCommands(commands.Cog):
                 row = await cursor.fetchone()
 
             if not row:
-                await interaction.followup.send("Game not found.")
+                await interaction.followup.send("Game not found.", ephemeral=True)
                 return
 
             game_id, official_name = await resolve_to_base_game(row[0], row[1])
