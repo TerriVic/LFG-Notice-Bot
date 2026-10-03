@@ -708,7 +708,7 @@ async def test_user_subscriptions_empty(setup_test_db):
 
 @pytest.mark.asyncio
 async def test_user_subscriptions_success(setup_test_db):
-    """Test user_subscriptions successfully lists a user's games alphabetically."""
+    """Test user_subscriptions successfully lists a user's games alphabetically in an embed."""
     interaction = make_mock_interaction(user_id=101)
 
     async with aiosqlite.connect(setup_test_db) as db:
@@ -727,11 +727,17 @@ async def test_user_subscriptions_success(setup_test_db):
     await cog.user_subscriptions.callback(cog, interaction, user=None, public=True)
 
     interaction.response.send_message.assert_awaited_once()
-    msg = interaction.response.send_message.call_args[0][0]
-    assert "Your subscribed games" in msg
-    assert "• Portal 2" in msg
-    assert "• Halo Infinite" in msg
-    assert interaction.response.send_message.call_args.kwargs.get("ephemeral") is False
+
+    # Retrieve keyword arguments passed to send_message
+    kwargs = interaction.response.send_message.call_args.kwargs
+    assert kwargs.get("ephemeral") is False
+
+    # Extract the embed and assert on title and description
+    embed = kwargs.get("embed")
+    assert embed is not None
+    assert embed.title == "Your Subscriptions"
+    assert "• Portal 2" in embed.description
+    assert "• Halo Infinite" in embed.description
 
 
 @pytest.mark.asyncio

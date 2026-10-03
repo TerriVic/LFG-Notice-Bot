@@ -6,7 +6,9 @@ from discord import app_commands
 
 # Adjust the import path to match your actual project structure
 from cogs.admin_cmds import (
-    AdminCommands
+    AdminCommands,
+    autocomplete_quickstart_messages,
+    build_quickstart_embed, update_quickstart_messages,
 )
 
 
@@ -41,8 +43,9 @@ def mock_interaction():
 @pytest.fixture
 def mock_db_connect():
     """Mocks the aiosqlite.connect context manager and its cursor."""
-    with patch('cogs.admin_cmds.aiosqlite.connect') as mock_connect:
-        mock_db = AsyncMock()
+    with patch("cogs.admin_cmds.aiosqlite.connect") as mock_connect:
+        mock_db = MagicMock()
+        mock_db.commit = AsyncMock()
         mock_cursor = AsyncMock()
 
         # Helper class to simulate aiosqlite's execute() return value,
@@ -64,6 +67,416 @@ def mock_db_connect():
 
         mock_connect.return_value.__aenter__.return_value = mock_db
         yield mock_db, mock_cursor
+
+
+# -----------------------------------------------------------------------------
+# Helper Function Tests
+# -----------------------------------------------------------------------------
+
+def test_build_quickstart_embed(mock_bot):
+    """Test that build_quickstart_embed constructs an embed with expected title, fields, and formatting."""
+    embed = build_quickstart_embed(mock_bot)
+
+    assert isinstance(embed, discord.Embed)
+    assert embed.title == "🚀 Server Quickstart Guide"
+    assert "Get set up with LFG notifications" in embed.description
+    assert embed.color == discord.Color.gold()
+    assert len(embed.fields) == 3
+
+    field_names = [field.name for field in embed.fields]
+    assert "1️⃣ Join Game Alerts" in field_names
+    assert "2️⃣ Call an LFG Ping" in field_names
+    assert "3️⃣ Manage Notifications" in field_names
+
+    assert "/subscribe" in embed.fields[0].value
+    assert "/ping_game" in embed.fields[1].value
+    assert "/quiet_mode" in embed.fields[2].value
+    assert embed.footer.text == "Type /help anytime to see all commands and settings."
+
+
+@pytest.mark.asyncio
+async def test_autocomplete_quickstart_messages():
+    """Test that autocomplete_quickstart_messages delegates to _autocomplete_guild_messages with correct params."""
+    mock_interaction = MagicMock(spec=discord.Interaction)
+    expected_choices = [MagicMock(), MagicMock()]
+
+    with patch("cogs.admin_cmds._autocomplete_guild_messages", new_callable=AsyncMock) as mock_delegate:
+        mock_delegate.return_value = expected_choices
+
+        result = await autocomplete_quickstart_messages(mock_interaction, "query")
+
+        mock_delegate.assert_awaited_once_with(
+            interaction=mock_interaction,
+            current="query",
+            table_name="quickstart_messages",
+            empty_label="No active quickstart messages found",
+        )
+        assert result == expected_choices
+
+@pytest.mark.asyncio
+async def test_update_quickstart_messages_target_message_id(mock_bot, mock_db_connect):
+    """Test updating a specific quickstart message by target_message_id."""
+    mock_db, mock_cursor = mock_db_connect
+    mock_cursor.fetchall.return_value = [(101, 201)]
+
+    mock_channel = AsyncMock()
+    mock_msg = AsyncMock()
+    mock_channel.fetch_message.return_value = mock_msg
+    mock_bot.get_channel = MagicMock(return_value=mock_channel)
+
+    count = await update_quickstart_messages(mock_bot, target_message_id=101)
+
+    assert count == 1
+    mock_db.execute.assert_called_once_with(
+        "SELECT message_id, channel_id FROM quickstart_messages WHERE message_id = ?",
+        (101,)
+    )
+    mock_bot.get_channel.assert_called_once_with(201)
+    mock_channel.fetch_message.assert_awaited_once_with(101)
+    mock_msg.edit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_update_quickstart_messages_guild_id_fetch_fallback(mock_bot, mock_db_connect):
+    """Test query filtering by guild_id and channel fetching fallback when get_channel returns None."""
+    mock_db, mock_cursor = mock_db_connect
+    mock_cursor.fetchall.return_value = [(102, 202)]
+
+    # Synchronous get_channel returns None to trigger async fetch_channel fallback
+    mock_bot.get_channel = MagicMock(return_value=None)
+    mock_channel = AsyncMock()
+    mock_msg = AsyncMock()
+    mock_channel.fetch_message.return_value = mock_msg
+    mock_bot.fetch_channel.return_value = mock_channel
+
+    count = await update_quickstart_messages(mock_bot, guild_id=67890)
+
+    assert count == 1
+    mock_db.execute.assert_called_once_with(
+        "SELECT message_id, channel_id FROM quickstart_messages WHERE guild_id = ?",
+        (67890,)
+    )
+    mock_bot.fetch_channel.assert_awaited_once_with(202)
+    mock_msg.edit.assert_awaited_once()
+
+@pytest.mark.asyncio
+async def test_update_quickstart_messages_all(mock_bot, mock_db_connect):
+    """Test updating all quickstart messages when no guild_id or target_message_id is supplied."""
+    mock_db, mock_cursor = mock_db_connect
+    mock_cursor.fetchall.return_value = [(101, 201), (102, 202)]
+
+    mock_channel1, mock_channel2 = AsyncMock(), AsyncMock()
+    mock_msg1, mock_msg2 = AsyncMock(), AsyncMock()
+    mock_channel1.fetch_message.return_value = mock_msg1
+    mock_channel2.fetch_message.return_value = mock_msg2
+
+    mock_bot.get_channel = MagicMock(side_effect=lambda cid: mock_channel1 if cid == 201 else mock_channel2)
+
+    count = await update_quickstart_messages(mock_bot)
+
+    assert count == 2
+    mock_db.execute.assert_called_once_with(
+        "SELECT message_id, channel_id FROM quickstart_messages",
+        ()
+    )
+    mock_msg1.edit.assert_awaited_once()
+    mock_msg2.edit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_update_quickstart_messages_channel_not_found(mock_bot, mock_db_connect):
+    """Test update_quickstart_messages gracefully handles missing/deleted channels."""
+    mock_db, mock_cursor = mock_db_connect
+    mock_cursor.fetchall.return_value = [(101, 201)]
+
+    mock_bot.get_channel = MagicMock(return_value=None)
+    mock_bot.fetch_channel.side_effect = discord.NotFound(MagicMock(), "Channel not found")
+
+    count = await update_quickstart_messages(mock_bot, target_message_id=101)
+
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_update_quickstart_messages_message_forbidden(mock_bot, mock_db_connect):
+    """Test update_quickstart_messages gracefully handles missing permissions on message edit/fetch."""
+    mock_db, mock_cursor = mock_db_connect
+    mock_cursor.fetchall.return_value = [(101, 201)]
+
+    mock_channel = AsyncMock()
+    mock_channel.fetch_message.side_effect = discord.Forbidden(MagicMock(), "Forbidden")
+    mock_bot.get_channel = MagicMock(return_value=mock_channel)
+
+    count = await update_quickstart_messages(mock_bot, target_message_id=101)
+
+    assert count == 0
+
+# -----------------------------------------------------------------------------
+# setup_quickstart Command Tests
+# -----------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_setup_quickstart_no_guild(admin_cog, mock_interaction):
+    """Test setup_quickstart rejects execution outside a guild (DM context)."""
+    mock_interaction.guild = None
+
+    await admin_cog.setup_quickstart.callback(admin_cog, mock_interaction)
+
+    mock_interaction.response.send_message.assert_awaited_once_with(
+        "This command must be run inside a server.", ephemeral=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_setup_quickstart_new_success(admin_cog, mock_interaction, mock_db_connect):
+    """Test setup_quickstart posts a new guide when no existing message is found in the guild."""
+    mock_db, mock_cursor = mock_db_connect
+    mock_cursor.fetchone.return_value = None  # No existing quickstart
+
+    mock_sent_message = AsyncMock()
+    mock_sent_message.id = 998877
+    mock_interaction.channel.send.return_value = mock_sent_message
+
+    await admin_cog.setup_quickstart.callback(admin_cog, mock_interaction)
+
+    mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    mock_interaction.channel.send.assert_awaited_once()
+
+    # Check DB insert call
+    assert mock_db.execute.called
+    insert_args = mock_db.execute.call_args_list[-1][0]
+    assert "INSERT INTO quickstart_messages" in insert_args[0]
+    assert insert_args[1][0] == 998877  # message_id
+    assert insert_args[1][1] == 67890   # guild_id
+    assert insert_args[1][2] == 111222  # channel_id
+
+    mock_interaction.followup.send.assert_awaited_once_with(
+        "✅ Quickstart guide embed posted successfully!", ephemeral=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_setup_quickstart_forbidden_permission(admin_cog, mock_interaction, mock_db_connect):
+    """Test setup_quickstart handles discord.Forbidden when bot lacks embed sending permissions."""
+    _, mock_cursor = mock_db_connect
+    mock_cursor.fetchone.return_value = None
+
+    mock_interaction.channel.send.side_effect = discord.Forbidden(
+        MagicMock(), "Missing Permissions"
+    )
+
+    await admin_cog.setup_quickstart.callback(admin_cog, mock_interaction)
+
+    mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    mock_interaction.followup.send.assert_awaited_once_with(
+        "❌ Bot lacks permission to send embeds in this channel.", ephemeral=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_setup_quickstart_existing_prompt_and_confirm(admin_cog, mock_interaction, mock_db_connect):
+    """Test setup_quickstart prompts confirmation when an existing quickstart is found and runs callback on confirm."""
+    mock_db, mock_cursor = mock_db_connect
+    mock_cursor.fetchone.return_value = (111222, 1700000000)  # existing channel_id, created_at
+
+    mock_sent_message = AsyncMock()
+    mock_sent_message.id = 554433
+    mock_interaction.channel.send.return_value = mock_sent_message
+
+    await admin_cog.setup_quickstart.callback(admin_cog, mock_interaction)
+
+    mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    mock_interaction.followup.send.assert_awaited_once()
+
+    call_kwargs = mock_interaction.followup.send.call_args.kwargs
+    prompt_text = mock_interaction.followup.send.call_args.args[0]
+    assert "A Quickstart Guide already exists in <#111222>" in prompt_text
+
+    view = call_kwargs.get("view")
+    assert view is not None
+
+    # Simulate user confirming via GenericConfirmationView
+    confirm_btn = view.children[0]
+
+    btn_interaction = MagicMock(spec=discord.Interaction)
+    btn_interaction.user.id = mock_interaction.user.id
+    btn_interaction.response = MagicMock()
+    btn_interaction.response.edit_message = AsyncMock()
+
+    # Execute view confirmation callback
+    await confirm_btn.callback(btn_interaction)
+
+    # Verify that post creation proceeded and populated confirm_message
+    mock_interaction.channel.send.assert_awaited_once()
+    assert getattr(view, "confirm_message", None) == "✅ Quickstart guide embed posted successfully!"
+    btn_interaction.response.edit_message.assert_awaited_once_with(
+        content="✅ Quickstart guide embed posted successfully!",
+        view=None
+    )
+
+
+# -----------------------------------------------------------------------------
+# update_quickstart Command Tests
+# -----------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_update_quickstart_no_guild(admin_cog, mock_interaction):
+    """Test update_quickstart rejects execution outside a guild (DM context)."""
+    mock_interaction.guild = None
+
+    await admin_cog.update_quickstart.callback(admin_cog, mock_interaction)
+
+    mock_interaction.response.send_message.assert_awaited_once_with(
+        "This command must be run inside a server.", ephemeral=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_quickstart_invalid_message(admin_cog, mock_interaction):
+    """Test update_quickstart handles non-integer message ID selection gracefully."""
+    await admin_cog.update_quickstart.callback(admin_cog, mock_interaction, message="invalid_id")
+
+    mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    mock_interaction.followup.send.assert_awaited_once_with(
+        "Invalid message selection.", ephemeral=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_quickstart_all_messages(admin_cog, mock_interaction):
+    """Test update_quickstart updates all guild messages when message choice is None or '__NONE__'."""
+    with patch("cogs.admin_cmds.update_quickstart_messages", new_callable=AsyncMock) as mock_update_fn:
+        mock_update_fn.return_value = 3
+
+        await admin_cog.update_quickstart.callback(admin_cog, mock_interaction, message=None)
+
+        mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        mock_update_fn.assert_awaited_once_with(
+            admin_cog.bot,
+            guild_id=67890,
+            target_message_id=None
+        )
+        mock_interaction.followup.send.assert_awaited_once_with(
+            "🔄 Successfully updated 3 Quickstart Guide message(s)!", ephemeral=True
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_quickstart_specific_message(admin_cog, mock_interaction):
+    """Test update_quickstart updates a single target message when valid ID string is passed."""
+    with patch("cogs.admin_cmds.update_quickstart_messages", new_callable=AsyncMock) as mock_update_fn:
+        mock_update_fn.return_value = 1
+
+        await admin_cog.update_quickstart.callback(admin_cog, mock_interaction, message="123456")
+
+        mock_update_fn.assert_awaited_once_with(
+            admin_cog.bot,
+            guild_id=67890,
+            target_message_id=123456
+        )
+        mock_interaction.followup.send.assert_awaited_once_with(
+            "🔄 Successfully updated 1 Quickstart Guide message(s)!", ephemeral=True
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_quickstart_zero_updated(admin_cog, mock_interaction):
+    """Test update_quickstart responds with warning when zero messages were updated."""
+    with patch("cogs.admin_cmds.update_quickstart_messages", new_callable=AsyncMock) as mock_update_fn:
+        mock_update_fn.return_value = 0
+
+        await admin_cog.update_quickstart.callback(admin_cog, mock_interaction, message="123456")
+
+        mock_interaction.followup.send.assert_awaited_once_with(
+            "⚠️ No matching quickstart messages were updated.", ephemeral=True
+        )
+
+
+# -----------------------------------------------------------------------------
+# remove_quickstart Command Tests
+# -----------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_remove_quickstart_none_selected(admin_cog, mock_interaction):
+    """Test remove_quickstart handles '__NONE__' message choice immediately without deferring."""
+    await admin_cog.remove_quickstart.callback(admin_cog, mock_interaction, message="__NONE__")
+
+    mock_interaction.response.send_message.assert_awaited_once_with(
+        "No quickstart message selected.", ephemeral=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_remove_quickstart_invalid_message(admin_cog, mock_interaction):
+    """Test remove_quickstart handles non-integer message string gracefully."""
+    await admin_cog.remove_quickstart.callback(admin_cog, mock_interaction, message="not_a_number")
+
+    mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    mock_interaction.followup.send.assert_awaited_once_with(
+        "Invalid message selection.", ephemeral=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_remove_quickstart_not_found_in_db(admin_cog, mock_interaction, mock_db_connect):
+    """Test remove_quickstart warns user when message ID is not present in database."""
+    _, mock_cursor = mock_db_connect
+    mock_cursor.fetchone.return_value = None
+
+    await admin_cog.remove_quickstart.callback(admin_cog, mock_interaction, message="999999")
+
+    mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    mock_interaction.followup.send.assert_awaited_once_with(
+        "Quickstart message not found in database.", ephemeral=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_remove_quickstart_success(admin_cog, mock_interaction, mock_db_connect):
+    """Test remove_quickstart deletes message from Discord channel and removes database record."""
+    mock_db, mock_cursor = mock_db_connect
+    mock_cursor.fetchone.return_value = (111222,)  # channel_id
+
+    mock_channel = AsyncMock()
+    mock_msg = AsyncMock()
+    mock_interaction.guild.get_channel.return_value = mock_channel
+    mock_channel.fetch_message.return_value = mock_msg
+
+    await admin_cog.remove_quickstart.callback(admin_cog, mock_interaction, message="999999")
+
+    mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    mock_channel.fetch_message.assert_awaited_once_with(999999)
+    mock_msg.delete.assert_awaited_once()
+
+    # Verify DB deletion query
+    mock_db.execute.assert_called_with(
+        "DELETE FROM quickstart_messages WHERE message_id = ?", (999999,)
+    )
+    mock_interaction.followup.send.assert_awaited_once_with(
+        "🗑️ Quickstart guide removed successfully.", ephemeral=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_remove_quickstart_discord_not_found_deletes_db_record(admin_cog, mock_interaction, mock_db_connect):
+    """Test remove_quickstart still deletes DB record if Discord message was already deleted manually."""
+    mock_db, mock_cursor = mock_db_connect
+    mock_cursor.fetchone.return_value = (111222,)
+
+    mock_channel = AsyncMock()
+    mock_channel.fetch_message.side_effect = discord.NotFound(MagicMock(), "Not Found")
+    mock_interaction.guild.get_channel.return_value = mock_channel
+
+    await admin_cog.remove_quickstart.callback(admin_cog, mock_interaction, message="999999")
+
+    # DB removal should still take place despite Discord NotFound
+    mock_db.execute.assert_called_with(
+        "DELETE FROM quickstart_messages WHERE message_id = ?", (999999,)
+    )
+    mock_interaction.followup.send.assert_awaited_once_with(
+        "🗑️ Quickstart guide removed successfully.", ephemeral=True
+    )
+
 
 @pytest.mark.asyncio
 async def test_setup_top_games_new_tracker(admin_cog, mock_interaction, mock_db_connect):

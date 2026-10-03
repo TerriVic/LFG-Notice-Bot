@@ -11,8 +11,10 @@ from database import DB_PATH
 from utils import (
     format_interval,
     get_bot_owner_id,
-    GenericConfirmationView, autocomplete_set_lfg_channels,
-    autocomplete_whitelisted_channels_only
+    GenericConfirmationView,
+    autocomplete_set_lfg_channels,
+    autocomplete_whitelisted_channels_only,
+    build_quickstart_embed
 )
 
 
@@ -32,37 +34,103 @@ def is_owner_or_moderator():
     check_decor.predicate = predicate  # Expose predicate for testing
     return check_decor
 
-async def autocomplete_live_messages(interaction: discord.Interaction, current: str):
+async def _autocomplete_guild_messages(
+        interaction: discord.Interaction,
+        current: str,
+        table_name: str,
+        empty_label: str,
+        extra_fields: str = "",
+        extra_label_fn=None,
+) -> list[app_commands.Choice[str]]:
     if not interaction.guild:
         return []
 
+    fields = f"message_id, channel_id, created_at{f', {extra_fields}' if extra_fields else ''}"
+
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            """
-            SELECT message_id, channel_id, entry_limit, update_interval, created_at 
-            FROM live_top_games 
-            WHERE guild_id = ? 
-            ORDER BY created_at DESC
-            """,
-            (interaction.guild.id,)
+                f"SELECT {fields} FROM {table_name} WHERE guild_id = ? ORDER BY created_at DESC",
+                (interaction.guild.id,)
         ) as cursor:
             rows = await cursor.fetchall()
 
     if not rows:
-        return [app_commands.Choice(name="No active live top game messages found", value="__NONE__")]
+        return [app_commands.Choice(name=empty_label, value="__NONE__")]
 
     choices = []
-    for msg_id, ch_id, limit, interval, created_at in rows:
+    for row in rows:
+        msg_id, ch_id, created_at = row[0], row[1], row[2]
         channel = interaction.guild.get_channel(ch_id)
         channel_name = f"#{channel.name}" if channel else f"Channel {ch_id}"
-
         time_str = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(created_at)) if created_at else "Unknown date"
-        label = f"{time_str} | {channel_name} | Top {limit} ({interval}h) | ID: {msg_id}"
+
+        extra_info = extra_label_fn(row) if extra_label_fn else ""
+        label = f"{time_str} | {channel_name}{extra_info} | ID: {msg_id}"
 
         if not current or current.lower() in label.lower() or current in str(msg_id):
             choices.append(app_commands.Choice(name=label[:100], value=str(msg_id)))
 
     return choices[:25]
+
+
+async def autocomplete_live_messages(interaction: discord.Interaction, current: str):
+    return await _autocomplete_guild_messages(
+        interaction=interaction,
+        current=current,
+        table_name="live_top_games",
+        empty_label="No active live top game messages found",
+        extra_fields="entry_limit, update_interval",
+        extra_label_fn=lambda row: f" | Top {row[3]} ({row[4]}h)",
+    )
+
+async def autocomplete_quickstart_messages(interaction: discord.Interaction, current: str):
+    return await _autocomplete_guild_messages(
+        interaction=interaction,
+        current=current,
+        table_name="quickstart_messages",
+        empty_label="No active quickstart messages found",
+    )
+
+async def update_quickstart_messages(
+        bot: commands.Bot,
+        guild_id: typing.Optional[int] = None,
+        target_message_id: typing.Optional[int] = None
+) -> int:
+    """Edits posted quickstart guide message(s) with the latest embed format."""
+    embed = build_quickstart_embed(bot)
+    updated_count = 0
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        if target_message_id:
+            query = "SELECT message_id, channel_id FROM quickstart_messages WHERE message_id = ?"
+            params = (target_message_id,)
+        elif guild_id:
+            query = "SELECT message_id, channel_id FROM quickstart_messages WHERE guild_id = ?"
+            params = (guild_id,)
+        else:
+            query = "SELECT message_id, channel_id FROM quickstart_messages"
+            params = ()
+
+        async with db.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+
+    for msg_id, ch_id in rows:
+        channel = bot.get_channel(ch_id)
+        if not channel:
+            try:
+                channel = await bot.fetch_channel(ch_id)
+            except (discord.NotFound, discord.Forbidden):
+                continue
+
+        if channel:
+            try:
+                msg = await channel.fetch_message(msg_id)
+                await msg.edit(embed=embed)
+                updated_count += 1
+            except (discord.NotFound, discord.Forbidden):
+                pass
+
+    return updated_count
 
 class AdminCommands(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -585,6 +653,149 @@ class AdminCommands(commands.Cog):
         embed.add_field(name="Whitelisted Channels", value=channels_desc, inline=False)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @mod_group.command(name="setup_quickstart", description="Post a permanent Quickstart Guide embed in this channel")
+    @is_owner_or_moderator()
+    async def setup_quickstart(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("This command must be run inside a server.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        async def create_quickstart() -> str:
+            embed = build_quickstart_embed(self.bot)
+
+            try:
+                message = await interaction.channel.send(embed=embed)
+            except discord.Forbidden:
+                return "❌ Bot lacks permission to send embeds in this channel."
+
+            try:
+                async with aiosqlite.connect(DB_PATH) as inner_db:
+                    await inner_db.execute(
+                        """
+                        INSERT INTO quickstart_messages (message_id, guild_id, channel_id, created_at)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (message.id, interaction.guild.id, interaction.channel.id, int(time.time()))
+                    )
+                    await inner_db.commit()
+                return "✅ Quickstart guide embed posted successfully!"
+            except Exception as e:
+                print(f"[Quickstart Setup Error] {e}")
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                return f"❌ Failed to set up quickstart guide: `{e}`"
+
+        # Check for existing quickstart message in this server
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                    "SELECT channel_id, created_at FROM quickstart_messages WHERE guild_id = ? ORDER BY created_at DESC LIMIT 1",
+                    (interaction.guild.id,)
+            ) as cursor:
+                existing = await cursor.fetchone()
+
+        if existing:
+            ch_id, created_at = existing
+            time_formatted = f"<t:{created_at}:f> (<t:{created_at}:R>)" if created_at else "an unknown date"
+
+            async def do_confirm(_inter: discord.Interaction):
+                result_text = await create_quickstart()
+                view.confirm_message = result_text
+
+            view = GenericConfirmationView(
+                author_id=interaction.user.id,
+                confirm_label="Create Quickstart Anyway",
+                cancel_message="❌ Setup canceled. No new quickstart guide was posted.",
+                on_confirm=do_confirm,
+                timeout=60.0
+            )
+
+            await interaction.followup.send(
+                f"⚠️ A Quickstart Guide already exists in <#{ch_id}>, sent on {time_formatted}.\n"
+                "Are you sure you want to create another one?",
+                view=view,
+                ephemeral=True
+            )
+        else:
+            status_text = await create_quickstart()
+            await interaction.followup.send(status_text, ephemeral=True)
+
+    @mod_group.command(name="update_quickstart", description="Refresh active Quickstart Guide message(s) to the latest format")
+    @app_commands.describe(message="Select a specific quickstart message to refresh, or leave blank to update all")
+    @app_commands.autocomplete(message=autocomplete_quickstart_messages)
+    @is_owner_or_moderator()
+    async def update_quickstart(
+            self,
+            interaction: discord.Interaction,
+            message: typing.Optional[str] = None
+    ):
+        if not interaction.guild:
+            await interaction.response.send_message("This command must be run inside a server.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        target_msg_id = None
+        if message and message != "__NONE__":
+            try:
+                target_msg_id = int(message)
+            except ValueError:
+                await interaction.followup.send("Invalid message selection.", ephemeral=True)
+                return
+
+        updated = await update_quickstart_messages(
+            self.bot,
+            guild_id=interaction.guild.id,
+            target_message_id=target_msg_id
+        )
+
+        if updated == 0:
+            await interaction.followup.send("⚠️ No matching quickstart messages were updated.", ephemeral=True)
+        else:
+            await interaction.followup.send(f"🔄 Successfully updated {updated} Quickstart Guide message(s)!", ephemeral=True)
+
+    @mod_group.command(name="remove_quickstart", description="Delete a Quickstart Guide message")
+    @app_commands.describe(message="Select the quickstart message to remove")
+    @app_commands.autocomplete(message=autocomplete_quickstart_messages)
+    @is_owner_or_moderator()
+    async def remove_quickstart(self, interaction: discord.Interaction, message: str):
+        if message == "__NONE__":
+            await interaction.response.send_message("No quickstart message selected.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            target_msg_id = int(message)
+        except ValueError:
+            await interaction.followup.send("Invalid message selection.", ephemeral=True)
+            return
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT channel_id FROM quickstart_messages WHERE message_id = ?", (target_msg_id,)) as cursor:
+                row = await cursor.fetchone()
+
+            if not row:
+                await interaction.followup.send("Quickstart message not found in database.", ephemeral=True)
+                return
+
+            channel_id = row[0]
+            channel = interaction.guild.get_channel(channel_id)
+            if channel:
+                try:
+                    msg = await channel.fetch_message(target_msg_id)
+                    await msg.delete()
+                except (discord.NotFound, discord.Forbidden):
+                    pass
+
+            await db.execute("DELETE FROM quickstart_messages WHERE message_id = ?", (target_msg_id,))
+            await db.commit()
+
+        await interaction.followup.send("🗑️ Quickstart guide removed successfully.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

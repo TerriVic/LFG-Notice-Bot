@@ -8,6 +8,7 @@ import aiohttp
 import aiosqlite
 import discord
 from discord import app_commands
+from discord.ext import commands
 
 from database import DB_PATH
 
@@ -694,6 +695,41 @@ def get_bot_owner_id() -> int:
     raw_owner_id = os.getenv("BOT_OWNER_ID")
     return int(raw_owner_id) if raw_owner_id and raw_owner_id.isdigit() else 0
 
+def format_command_mention(bot: discord.Client, name: str, sub: str = None) -> str:
+    """
+    Formats a slash command into a clickable Discord command mention </name:id>.
+    Falls back to `/{name}` if command IDs are not loaded or synced yet.
+    """
+    cid = getattr(bot, "command_ids", {}).get(name)
+    if sub:
+        full_cmd = f"{name} {sub}"
+        return f"</{full_cmd}:{cid}>" if cid else f"`/{full_cmd}`"
+    return f"</{name}:{cid}>" if cid else f"`/{name}`"
+
+def build_quickstart_embed(bot: commands.Bot) -> discord.Embed:
+    embed = discord.Embed(
+        title="🚀 Server Quickstart Guide",
+        description="Get set up with LFG notifications and start finding teammates in 3 easy steps!",
+        color=discord.Color.gold()
+    )
+    embed.add_field(
+        name="1️⃣ Join Game Alerts",
+        value=f"Use {format_command_mention(bot, 'subscribe')} `<game>` to receive notifications when members want to play.",
+        inline=False
+    )
+    embed.add_field(
+        name="2️⃣ Call an LFG Ping",
+        value=f"Use {format_command_mention(bot, 'ping_game')} `<game>` `[note]` when you need a squad for a session.",
+        inline=False
+    )
+    embed.add_field(
+        name="3️⃣ Manage Notifications",
+        value=f"Use {format_command_mention(bot, 'quiet_mode')} to temporarily silence pings or {format_command_mention(bot, 'user_subscriptions')} to view your list.",
+        inline=False
+    )
+    embed.set_footer(text="Type /help anytime to see all commands and settings.")
+    return embed
+
 # noinspection PyTypeChecker
 class GenericConfirmationView(discord.ui.View):
     def __init__(
@@ -731,3 +767,32 @@ class GenericConfirmationView(discord.ui.View):
     async def cancel_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
         self.stop()
         await interaction.response.edit_message(content=self.cancel_message, view=None)
+
+# --- BUTTON VIEW FOR /game_info & /top_games ---
+class GameInfoSubscribeView(discord.ui.View):
+    def __init__(self, game_id: int, game_name: str, db, cursor):
+        super().__init__(timeout=120)  # Buttons stay active for 2 minutes
+        self.game_id = game_id
+        self.game_name = game_name
+        self.db = db
+        self.cursor = cursor
+
+    @discord.ui.button(label="Subscribe to Game 🔔", style=discord.ButtonStyle.primary, custom_id="btn_sub_game")
+    async def subscribe_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = interaction.user.id
+
+        # Check if already subscribed
+        self.cursor.execute("SELECT 1 FROM subscriptions WHERE user_id = ? AND game_id = ?", (user_id, self.game_id))
+        if self.cursor.fetchone():
+            await interaction.response.send_message(
+                f"You are already subscribed to **{self.game_name}**!", ephemeral=True
+            )
+            return
+
+        # Insert subscription
+        self.cursor.execute("INSERT INTO subscriptions (user_id, game_id) VALUES (?, ?)", (user_id, self.game_id))
+        self.db.commit()
+
+        await interaction.response.send_message(
+            f"✅ Subscribed to **{self.game_name}**! You'll now receive pings for LFG alerts.", ephemeral=True
+        )

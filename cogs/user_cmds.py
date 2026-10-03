@@ -12,7 +12,10 @@ from utils import (
     autocomplete_games,
     fetch_and_cache_game_from_igdb,
     fetch_game_details_from_igdb,
-    GenericConfirmationView, is_lfg_allowed_in_channel
+    GenericConfirmationView,
+    is_lfg_allowed_in_channel,
+    GameInfoSubscribeView,
+    format_command_mention as fmt, build_quickstart_embed
 )
 
 
@@ -68,30 +71,46 @@ class UserCommands(commands.Cog):
         limit = max(1, min(limit, 25))
 
         async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT s.user_id, g.name FROM subscriptions s JOIN igdb_games g ON s.game_id = g.id") as cursor:
+            async with db.execute(
+                    """
+                    SELECT s.user_id, g.id, g.name
+                    FROM subscriptions s
+                             JOIN igdb_games g ON s.game_id = g.id
+                    """
+            ) as cursor:
                 rows = await cursor.fetchall()
 
         if not rows:
             await interaction.followup.send("There are no active subscriptions in this server.", ephemeral=not public)
             return
 
-        # Count subscriptions per game for members present in this guild
-        game_counts = {}
-        for user_id, game_name in rows:
+        # Aggregate counts and store game IDs for present members
+        game_data = {} # game_name -> {"id": game_id, "count": count}
+        for user_id, game_id, game_name in rows:
             if interaction.guild.get_member(user_id):
-                game_counts[game_name] = game_counts.get(game_name, 0) + 1
+                if game_name not in game_data:
+                    game_data[game_name] = {"id": game_id, "count": 0}
+                game_data[game_name]["count"] += 1
 
-        if not game_counts:
+        if not game_data:
             await interaction.followup.send("No members in this server are currently subscribed to any games.", ephemeral=not public)
             return
 
         # Sort games by subscriber count in descending order
-        sorted_games = sorted(game_counts.items(), key=lambda x: x[1], reverse=True)[:limit]
-        formatted_list = [f"`#{idx + 1}` **{gname}** — {cnt} {'subscriber' if cnt == 1 else 'subscribers'}" for idx, (gname, cnt) in enumerate(sorted_games)]
+        sorted_games = sorted(game_data.items(), key=lambda x: x[1]["count"], reverse=True)[:limit]
+
+        # Format text output for embed
+        formatted_list = [
+            f"`#{idx + 1}` **{gname}** — {info['count']} {'subscriber' if info['count'] == 1 else 'subscribers'}"
+            for idx, (gname, info) in enumerate(sorted_games)
+        ]
+
+        description_text = "\n".join(formatted_list)
+        description_text += f"\n\n-# Tip: Use {fmt(self.bot, 'subscribe')} to subscribe to a game!"
 
         embed = discord.Embed(
             title=f"Top {len(sorted_games)} Games in {interaction.guild.name}",
-            description="\n".join(formatted_list),
+            description=description_text,
             color=discord.Color.gold()
         )
 
@@ -235,8 +254,12 @@ class UserCommands(commands.Cog):
             ) as cursor:
                 template_row = await cursor.fetchone()
 
+        # Filter subscribers strictly to members present in the current server
+        if interaction.guild:
+            rows = [r for r in rows if interaction.guild.get_member(r[0]) is not None]
+
         if not rows:
-            await interaction.followup.send(f"No other subscribers to ping for **{official_name}**.")
+            await interaction.followup.send(f"No other subscribers in this server to ping for **{official_name}**.")
             return
 
         active_user_ids = [r[0] for r in rows if r[1] == 0]
@@ -398,8 +421,6 @@ class UserCommands(commands.Cog):
             ) as cursor:
                 rows = await cursor.fetchall()
 
-        header = "Your subscribed games" if target_user.id == interaction.user.id else f"Subscribed games for {target_user.mention}"
-
         if not rows:
             await interaction.response.send_message(
                 f"No active subscriptions found for {target_user.mention}.",
@@ -410,11 +431,9 @@ class UserCommands(commands.Cog):
 
         game_list = "\n".join(f"• {row[0]}" for row in rows)
 
-        await interaction.response.send_message(
-            f"**{header}** ({len(rows)}):\n{game_list}",
-            ephemeral=not public,
-            allowed_mentions=discord.AllowedMentions.none()
-        )
+        embed = discord.Embed(title="Your Subscriptions", description=game_list, color=discord.Color.green())
+
+        await interaction.response.send_message(embed=embed, ephemeral=not public)
 
     @app_commands.command(name="show_subscribers", description="View all users in this server subscribed to a game without pinging them")
     @app_commands.autocomplete(game=autocomplete_games)
@@ -580,7 +599,8 @@ class UserCommands(commands.Cog):
         embed.add_field(name="👥 Subscribers in Server", value=str(subscriber_count), inline=True)
         embed.set_footer(text="Data provided by IGDB")
 
-        await interaction.followup.send(embed=embed, ephemeral=not public)
+        view = GameInfoSubscribeView(game_id=game_id, game_name=title, db=db, cursor=cursor)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     @app_commands.command(name="set_subscribed_indicator", description="Set a custom icon/indicator for your subscribed games in autocomplete")
     @app_commands.describe(indicator="Custom icon, emoji, or text (e.g. 🔥, [SUB], ⭐). Max 10 chars.")
@@ -751,13 +771,6 @@ class UserCommands(commands.Cog):
     @app_commands.command(name="help", description="Show information about available bot commands")
     @app_commands.describe(public="Set to True to send response publicly in channel (Default: False)")
     async def help_command(self, interaction: discord.Interaction, public: bool = False):
-        # Lookup helper: supports standalone commands or group subcommands
-        def fmt(name: str, sub: str = None) -> str:
-            cid = getattr(self.bot, "command_ids", {}).get(name)
-            if sub:
-                full_cmd = f"{name} {sub}"
-                return f"</{full_cmd}:{cid}>" if cid else f"`/{full_cmd}`"
-            return f"</{name}:{cid}>" if cid else f"`/{name}`"
 
         embed = discord.Embed(
             title="Bot Command Guide",
@@ -771,10 +784,10 @@ class UserCommands(commands.Cog):
         embed.add_field(
             name="Game Info & Subscriptions",
             value=(
-                f"• {fmt('game_info')} `<game>` `[public]` — Get details, genres, and cover image for a game.\n"
-                f"• {fmt('subscribe')} `<game>` — Subscribe to LFG notifications.\n"
-                f"• {fmt('unsubscribe')} `<game>` — Unsubscribe from active notifications.\n"
-                f"• {fmt('user_subscriptions')} `[user]` `[public]` — View active game subscriptions."
+                f"• {fmt(self.bot, 'game_info')} `<game>` `[public]` — Get details, genres, and cover image for a game.\n"
+                f"• {fmt(self.bot, 'subscribe')} `<game>` — Subscribe to LFG notifications.\n"
+                f"• {fmt(self.bot, 'unsubscribe')} `<game>` — Unsubscribe from active notifications.\n"
+                f"• {fmt(self.bot, 'user_subscriptions')} `[user]` `[public]` — View active game subscriptions."
             ),
             inline=False
         )
@@ -782,16 +795,16 @@ class UserCommands(commands.Cog):
         embed.add_field(
             name="Server Activity & Social",
             value=(
-                f"• {fmt('ping_game')} `<game>` `[public]` — Send an LFG ping mentioning subscribers.\n"
-                f"• {fmt('quiet_mode')} `[enabled]` `[scope]` — Toggle or set quiet mode notifications globally or per-server.\n"
-                f"• {fmt('set_ping_template')} `<template>` — Set custom template for `/ping_game` notifications.\n"
-                f"• {fmt('view_ping_template')} — View your saved custom ping format.\n"
-                f"• {fmt('reset_ping_template')} — Reset ping template to default.\n"
-                f"• {fmt('set_subscribed_indicator')} `<indicator>` — Set custom icon for subscribed games in autocomplete.\n"
-                f"• {fmt('view_subscribed_indicator')} — View saved autocomplete indicator.\n"
-                f"• {fmt('reset_subscribed_indicator')} — Reset autocomplete indicator to default (`⭐`).\n"
-                f"• {fmt('top_games')} `[limit]` `[public]` — View popular server games.\n"
-                f"• {fmt('show_subscribers')} `<game>` — List subscribers for a game."
+                f"• {fmt(self.bot, 'ping_game')} `<game>` `[public]` — Send an LFG ping mentioning subscribers.\n"
+                f"• {fmt(self.bot, 'quiet_mode')} `[enabled]` `[scope]` — Toggle or set quiet mode notifications globally or per-server.\n"
+                f"• {fmt(self.bot, 'set_ping_template')} `<template>` — Set custom template for `/ping_game` notifications.\n"
+                f"• {fmt(self.bot, 'view_ping_template')} — View your saved custom ping format.\n"
+                f"• {fmt(self.bot, 'reset_ping_template')} — Reset ping template to default.\n"
+                f"• {fmt(self.bot, 'set_subscribed_indicator')} `<indicator>` — Set custom icon for subscribed games in autocomplete.\n"
+                f"• {fmt(self.bot, 'view_subscribed_indicator')} — View saved autocomplete indicator.\n"
+                f"• {fmt(self.bot, 'reset_subscribed_indicator')} — Reset autocomplete indicator to default (`⭐`).\n"
+                f"• {fmt(self.bot, 'top_games')} `[limit]` `[public]` — View popular server games.\n"
+                f"• {fmt(self.bot, 'show_subscribers')} `<game>` — List subscribers for a game."
             ),
             inline=False
         )
@@ -799,8 +812,17 @@ class UserCommands(commands.Cog):
         embed.add_field(
             name="Data & Privacy",
             value=(
-                f"• {fmt('delete_my_subscriptions')} — Purge all your active game subscriptions.\n"
-                f"• {fmt('delete_all_my_data')} — Purge all game subscriptions and user settings/ping templates."
+                f"• {fmt(self.bot, 'delete_my_subscriptions')} — Purge all your active game subscriptions.\n"
+                f"• {fmt(self.bot, 'delete_all_my_data')} — Purge all game subscriptions and user settings/ping templates."
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="Info",
+            value=(
+                f"• {fmt(self.bot, 'help')} — View this help message.\n"
+                f"• {fmt(self.bot, 'quickstart')} — View quickstart message."
             ),
             inline=False
         )
@@ -815,14 +837,17 @@ class UserCommands(commands.Cog):
             embed.add_field(
                 name="Server Administration",
                 value=(
-                    f"• {fmt('config', 'setup_top_games')} `[limit]` `[interval]` — Post a live-updating top games message.\n"
-                    f"• {fmt('config', 'edit_top_games')} `<message>` `[limit]` `[interval]` — Edit tracker settings or force a refresh.\n"
-                    f"• {fmt('config', 'force_update_top_games')} `<message>` — Force an immediate refresh on a live tracker.\n"
-                    f"• {fmt('config', 'remove_top_games')} `<message>` — Stop tracking and delete a live top games message.\n"
-                    f"• {fmt('config', 'set_lfg_channels')} `<mode> [channel]` — Allow all channels or add whitelisted channels.\n"
-                    f"• {fmt('config', 'remove_lfg_channels')} `<mode> [channel]` — Disable all channels or remove a whitelisted channel.\n"
-                    f"• {fmt('config', 'view_lfg_channels')} — View current LFG channel configuration.\n"
-                    f"• {fmt('config', 'server_overview')} — View subscription details for members in the server."
+                    f"• {fmt(self.bot, 'config', 'setup_top_games')} `[limit]` `[interval]` — Post a live-updating top games message.\n"
+                    f"• {fmt(self.bot, 'config', 'edit_top_games')} `<message>` `[limit]` `[interval]` — Edit tracker settings or force a refresh.\n"
+                    f"• {fmt(self.bot, 'config', 'force_update_top_games')} `<message>` — Force an immediate refresh on a live tracker.\n"
+                    f"• {fmt(self.bot, 'config', 'remove_top_games')} `<message>` — Stop tracking and delete a live top games message.\n"
+                    f"• {fmt(self.bot, 'config', 'set_lfg_channels')} `<mode> [channel]` — Allow all channels or add whitelisted channels.\n"
+                    f"• {fmt(self.bot, 'config', 'remove_lfg_channels')} `<mode> [channel]` — Disable all channels or remove a whitelisted channel.\n"
+                    f"• {fmt(self.bot, 'config', 'view_lfg_channels')} — View current LFG channel configuration.\n"
+                    f"• {fmt(self.bot, 'config', 'server_overview')} — View subscription details for members in the server."
+                    f"• {fmt(self.bot, 'config', 'setup_quickstart')} — Post a Quickstart Guide embed.\n"
+                    f"• {fmt(self.bot, 'config', 'remove_quickstart')} `<message>` — Remove a Quickstart Guide message.\n"
+                    f"• {fmt(self.bot, 'config', 'update_quickstart')} `[message]` — Reload the contents of all quickstart messages, or a specific message (in case of an update)."
                 ),
                 inline=False
             )
@@ -830,6 +855,12 @@ class UserCommands(commands.Cog):
         embed.set_footer(text="Looking for a missing game or DLC? Type its full name in /subscribe!")
 
         await interaction.response.send_message(embed=embed, ephemeral=not public)
+
+    @app_commands.command(name="quickstart", description="A quick 3-step guide to get started with LFG and game notifications")
+    async def quickstart(self, interaction: discord.Interaction):
+        embed = build_quickstart_embed(self.bot)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(UserCommands(bot))
