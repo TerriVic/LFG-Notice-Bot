@@ -60,6 +60,17 @@ async def init_db():
                          );
                          """)
 
+        # 4. Quickstart messages table
+        # Quickstart Messages Table
+        await db.execute("""
+                         CREATE TABLE IF NOT EXISTS quickstart_messages (
+                                                                            message_id INTEGER PRIMARY KEY,
+                                                                            guild_id INTEGER NOT NULL,
+                                                                            channel_id INTEGER NOT NULL,
+                                                                            created_at INTEGER NOT NULL
+                         );
+                         """)
+
         # Commit initial table creations so they exist for subsequent checks/migrations
         await db.commit()
 

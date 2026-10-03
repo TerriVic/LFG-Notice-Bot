@@ -38,7 +38,8 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 | `/reset_subscribed_indicator`           | Reset your subscribed game autocomplete indicator back to default (`⭐`).                          |
 | `/delete_my_subscriptions`              | Purge all your active game subscriptions.                                                         |
 | `/delete_all_my_data`                   | Purge all your active game subscriptions and user settings/ping templates.                        |
-| `/help [public]`                        | View an interactive command guide.                                                                |
+| `/quickstart`                           | View the quickstart guide.                                                                        |
+| `/help`                                 | View the command guide.                                                                           |
 
 ### Bot Config Commands (`/config`)
 | Command                                               | Description                                                                                                                                                        |
@@ -51,6 +52,9 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 | `/config remove_lfg_channels <mode> [channel]`        | Set mode to disable LFG server-wide (`none`) or remove specific whitelisted channels.                                                                              |
 | `/config view_lfg_channels`                           | View current LFG channel configuration embed.                                                                                                                      |
 | `/config server_overview`                             | View subscription details for members in the server where the command is called.                                                                                   |                                                                                  |
+| `/config setup_quickstart`                            | Post a Quickstart Guide embed.                                                                                                                                     |
+| `/config remove_quickstart <message>`                 | Remove a Quickstart Guide message.                                                                                                                                 |
+| `/config update_quickstart [message]`                 | Reload the contents of all quickstart messages, or a specific message (in case of an update)                                                                       |
 
 ---
 

@@ -8,6 +8,7 @@ import aiohttp
 import aiosqlite
 import discord
 from discord import app_commands
+from discord.ext import commands
 
 from database import DB_PATH
 
@@ -694,6 +695,41 @@ def get_bot_owner_id() -> int:
     raw_owner_id = os.getenv("BOT_OWNER_ID")
     return int(raw_owner_id) if raw_owner_id and raw_owner_id.isdigit() else 0
 
+def format_command_mention(bot: discord.Client, name: str, sub: str = None) -> str:
+    """
+    Formats a slash command into a clickable Discord command mention </name:id>.
+    Falls back to `/{name}` if command IDs are not loaded or synced yet.
+    """
+    cid = getattr(bot, "command_ids", {}).get(name)
+    if sub:
+        full_cmd = f"{name} {sub}"
+        return f"</{full_cmd}:{cid}>" if cid else f"`/{full_cmd}`"
+    return f"</{name}:{cid}>" if cid else f"`/{name}`"
+
+def build_quickstart_embed(bot: commands.Bot) -> discord.Embed:
+    embed = discord.Embed(
+        title="🚀 Server Quickstart Guide",
+        description="Get set up with LFG notifications and start finding teammates in 3 easy steps!",
+        color=discord.Color.gold()
+    )
+    embed.add_field(
+        name="1️⃣ Join Game Alerts",
+        value=f"Use {format_command_mention(bot, 'subscribe')} `<game>` to receive notifications when members want to play.",
+        inline=False
+    )
+    embed.add_field(
+        name="2️⃣ Call an LFG Ping",
+        value=f"Use {format_command_mention(bot, 'ping_game')} `<game>` `[note]` when you need a squad for a session.",
+        inline=False
+    )
+    embed.add_field(
+        name="3️⃣ Manage Notifications",
+        value=f"Use {format_command_mention(bot, 'quiet_mode')} to temporarily silence pings or {format_command_mention(bot, 'user_subscriptions')} to view your list.",
+        inline=False
+    )
+    embed.set_footer(text="Type /help anytime to see all commands and settings.")
+    return embed
+
 # noinspection PyTypeChecker
 class GenericConfirmationView(discord.ui.View):
     def __init__(
@@ -731,3 +767,168 @@ class GenericConfirmationView(discord.ui.View):
     async def cancel_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
         self.stop()
         await interaction.response.edit_message(content=self.cancel_message, view=None)
+
+# --- BUTTON VIEW FOR /game_info & /top_games ---
+class GameInfoSubscribeView(discord.ui.View):
+    def __init__(self, game_id: int, game_name: str, db, cursor):
+        super().__init__(timeout=120)  # Buttons stay active for 2 minutes
+        self.game_id = game_id
+        self.game_name = game_name
+        self.db = db
+        self.cursor = cursor
+
+    @discord.ui.button(label="Subscribe to Game 🔔", style=discord.ButtonStyle.primary, custom_id="btn_sub_game")
+    async def subscribe_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = interaction.user.id
+
+        # Check if already subscribed
+        self.cursor.execute("SELECT 1 FROM subscriptions WHERE user_id = ? AND game_id = ?", (user_id, self.game_id))
+        if self.cursor.fetchone():
+            await interaction.response.send_message(
+                f"You are already subscribed to **{self.game_name}**!", ephemeral=True
+            )
+            return
+
+        # Insert subscription
+        self.cursor.execute("INSERT INTO subscriptions (user_id, game_id) VALUES (?, ?)", (user_id, self.game_id))
+        self.db.commit()
+
+        await interaction.response.send_message(
+            f"✅ Subscribed to **{self.game_name}**! You'll now receive pings for LFG alerts.", ephemeral=True
+        )
+
+class TopGamesDropdownSelect(discord.ui.Select):
+    def __init__(self, top_games: list[tuple[int, str]], db_path: str):
+        self.db_path = db_path
+
+        # Build select menu options from top games list [(game_id, game_name), ...]
+        options = [
+            discord.SelectOption(
+                label=game_name[:100],
+                value=str(game_id),
+                description=f"Click to subscribe to {game_name[:50]}"
+            )
+            for game_id, game_name in top_games[:25]  # Discord limits select menus to 25 options
+        ]
+
+        super().__init__(
+            placeholder="Select a game to subscribe...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_game_id = int(self.values[0])
+        # Find the game name from options
+        selected_name = next(opt.label for opt in self.options if opt.value == self.values[0])
+
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                    "SELECT 1 FROM subscriptions WHERE user_id = ? AND game_id = ?",
+                    (interaction.user.id, selected_game_id)
+            ) as cursor:
+                if await cursor.fetchone():
+                    await interaction.response.send_message(
+                        f"⭐ You are already subscribed to **{selected_name}**!",
+                        ephemeral=True
+                    )
+                    return
+
+            await db.execute(
+                "INSERT INTO subscriptions (user_id, game_id) VALUES (?, ?)",
+                (interaction.user.id, selected_game_id)
+            )
+            await db.commit()
+
+        await interaction.response.send_message(
+            f"✅ Subscribed to **{selected_name}**!",
+            ephemeral=True
+        )
+
+class TopGamesDropdownView(discord.ui.View):
+    def __init__(self, top_games: list[tuple[int, str]], db_path: str):
+        super().__init__(timeout=180)
+        self.add_item(TopGamesDropdownSelect(top_games, db_path))
+
+# -------------------------------------------------------------
+# 1. THE SELECTION VIEW (Sent Ephemerally to User)
+# -------------------------------------------------------------
+class TopGamesDropdownSelect(discord.ui.Select):
+    def __init__(self, top_games: list[tuple[int, str]], db_path: str):
+        self.db_path = db_path
+
+        options = [
+            discord.SelectOption(
+                label=gname[:100],
+                value=str(gid),
+                description=f"Click to subscribe to {gname[:50]}",
+                emoji="🎮"
+            )
+            for gid, gname in top_games[:25]
+        ]
+
+        super().__init__(
+            placeholder="Select a game to subscribe...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_game_id = int(self.values[0])
+        selected_name = next(opt.label for opt in self.options if opt.value == self.values[0])
+
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                    "SELECT 1 FROM subscriptions WHERE user_id = ? AND game_id = ?",
+                    (interaction.user.id, selected_game_id)
+            ) as cursor:
+                if await cursor.fetchone():
+                    await interaction.response.send_message(
+                        f"⭐ You are already subscribed to **{selected_name}**!",
+                        ephemeral=True
+                    )
+                    return
+
+            await db.execute(
+                "INSERT INTO subscriptions (user_id, game_id) VALUES (?, ?)",
+                (interaction.user.id, selected_game_id)
+            )
+            await db.commit()
+
+        await interaction.response.send_message(
+            f"✅ Subscribed to **{selected_name}**!",
+            ephemeral=True
+        )
+
+
+class TopGamesSelectionView(discord.ui.View):
+    def __init__(self, top_games: list[tuple[int, str]], db_path: str):
+        super().__init__(timeout=120)
+        self.add_item(TopGamesDropdownSelect(top_games, db_path))
+
+
+# -------------------------------------------------------------
+# 2. THE TRIGGER BUTTON VIEW (Placed under public Embed)
+# -------------------------------------------------------------
+class TopGamesDropdownTriggerView(discord.ui.View):
+    def __init__(self, top_games: list[tuple[int, str]], db_path: str):
+        super().__init__(timeout=None)  # Persistent button
+        self.top_games = top_games
+        self.db_path = db_path
+
+    @discord.ui.button(
+        label="Subscribe to Top Games",
+        style=discord.ButtonStyle.primary,
+        emoji="🎮",
+        custom_id="btn_open_top_games_select"
+    )
+    async def open_select_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Sends the dropdown menu as an EPHEMERAL response visible ONLY to the user who clicked it
+        view = TopGamesSelectionView(top_games=self.top_games, db_path=self.db_path)
+        await interaction.response.send_message(
+            "Select a game from the list below to subscribe:",
+            view=view,
+            ephemeral=True
+        )
