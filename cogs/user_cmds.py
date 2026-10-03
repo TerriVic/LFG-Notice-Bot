@@ -15,7 +15,6 @@ from utils import (
     GenericConfirmationView,
     is_lfg_allowed_in_channel,
     GameInfoSubscribeView,
-    TopGamesDropdownTriggerView,
     format_command_mention as fmt, build_quickstart_embed
 )
 
@@ -72,30 +71,46 @@ class UserCommands(commands.Cog):
         limit = max(1, min(limit, 25))
 
         async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT s.user_id, g.name FROM subscriptions s JOIN igdb_games g ON s.game_id = g.id") as cursor:
+            async with db.execute(
+                    """
+                    SELECT s.user_id, g.id, g.name
+                    FROM subscriptions s
+                             JOIN igdb_games g ON s.game_id = g.id
+                    """
+            ) as cursor:
                 rows = await cursor.fetchall()
 
         if not rows:
             await interaction.followup.send("There are no active subscriptions in this server.", ephemeral=not public)
             return
 
-        # Count subscriptions per game for members present in this guild
-        game_counts = {}
-        for user_id, game_name in rows:
+        # Aggregate counts and store game IDs for present members
+        game_data = {} # game_name -> {"id": game_id, "count": count}
+        for user_id, game_id, game_name in rows:
             if interaction.guild.get_member(user_id):
-                game_counts[game_name] = game_counts.get(game_name, 0) + 1
+                if game_name not in game_data:
+                    game_data[game_name] = {"id": game_id, "count": 0}
+                game_data[game_name]["count"] += 1
 
-        if not game_counts:
+        if not game_data:
             await interaction.followup.send("No members in this server are currently subscribed to any games.", ephemeral=not public)
             return
 
         # Sort games by subscriber count in descending order
-        sorted_games = sorted(game_counts.items(), key=lambda x: x[1], reverse=True)[:limit]
-        formatted_list = [f"`#{idx + 1}` **{gname}** — {cnt} {'subscriber' if cnt == 1 else 'subscribers'}" for idx, (gname, cnt) in enumerate(sorted_games)]
+        sorted_games = sorted(game_data.items(), key=lambda x: x[1]["count"], reverse=True)[:limit]
+
+        # Format text output for embed
+        formatted_list = [
+            f"`#{idx + 1}` **{gname}** — {info['count']} {'subscriber' if info['count'] == 1 else 'subscribers'}"
+            for idx, (gname, info) in enumerate(sorted_games)
+        ]
+
+        description_text = "\n".join(formatted_list)
+        description_text += f"\n\n-# Tip: Use {fmt(self.bot, 'subscribe')} to subscribe to a game!"
 
         embed = discord.Embed(
             title=f"Top {len(sorted_games)} Games in {interaction.guild.name}",
-            description="\n".join(formatted_list),
+            description=description_text,
             color=discord.Color.gold()
         )
 
