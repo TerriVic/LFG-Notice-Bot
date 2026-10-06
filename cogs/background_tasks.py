@@ -57,9 +57,20 @@ async def refresh_live_top_games(
 
             try:
                 message = await channel.fetch_message(message_id)
+
             except (discord.NotFound, discord.Forbidden):
-                await db.execute("DELETE FROM live_top_games WHERE message_id = ?", (message_id,))
+                await db.execute(
+                    "DELETE FROM live_top_games WHERE message_id = ?",
+                    (message_id,)
+                )
                 await db.commit()
+                continue
+
+            except (discord.HTTPException, asyncio.TimeoutError) as e:
+                print(
+                    f"[Live Top Games] Failed to fetch message {message_id}: "
+                    f"{type(e).__name__}: {e}"
+                )
                 continue
 
             game_counts = {}
@@ -87,7 +98,15 @@ async def refresh_live_top_games(
                 color=discord.Color.green()
             )
 
-            await message.edit(content=None, embed=embed)
+            try:
+                await message.edit(content=None, embed=embed)
+
+            except (discord.HTTPException, asyncio.TimeoutError) as e:
+                print(
+                    f"[Live Top Games] Failed to update message {message_id}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                continue
 
             await db.execute("UPDATE live_top_games SET last_updated = ? WHERE message_id = ?", (now, message_id))
             await db.commit()
