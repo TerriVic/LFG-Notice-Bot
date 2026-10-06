@@ -1,5 +1,7 @@
 import os
 import asyncio
+import traceback
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -62,25 +64,64 @@ async def sync_commands(ctx: commands.Context, guild_id: int = None):
         print(f"[Help] Failed to update cached command IDs: {e}")
 
 @client.tree.error
-async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+async def on_app_command_error(
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError
+):
     # Handle cooldowns first and return early
     if isinstance(error, app_commands.CommandOnCooldown):
         seconds = round(error.retry_after)
-        msg = f"⏳ Easy there! You can use this command again in **{seconds} seconds**."
+        msg = (
+            f"⏳ Easy there! You can use this command again in "
+            f"**{seconds} seconds**."
+        )
+
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
         else:
             await interaction.response.send_message(msg, ephemeral=True)
+
         return
 
-    # Handle general permission/check failures
+    # Handle permission/check failures
     if isinstance(error, app_commands.CheckFailure):
         msg = "⛔ You do not have permission to run this administrative command."
+
         if interaction.response.is_done():
             await interaction.followup.send(msg, ephemeral=True)
         else:
             await interaction.response.send_message(msg, ephemeral=True)
+
         return
+
+    original_error = getattr(error, "original", error)
+
+    print(
+        f"[App Command Error] "
+        f"{type(original_error).__name__}: {original_error}"
+    )
+
+    traceback.print_exception(
+        type(original_error),
+        original_error,
+        original_error.__traceback__
+    )
+
+    msg = (
+        "❌ An unexpected error occurred while running this command. "
+        "The error has been logged."
+    )
+
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except discord.HTTPException as response_error:
+        print(
+            f"[App Command Error] Failed to send error response: "
+            f"{response_error}"
+        )
 
 @client.event
 async def on_ready():

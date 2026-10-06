@@ -841,13 +841,20 @@ class UserCommands(commands.Cog):
                     f"• {fmt(self.bot, 'config', 'edit_top_games')} `<message>` `[limit]` `[interval]` — Edit tracker settings or force a refresh.\n"
                     f"• {fmt(self.bot, 'config', 'force_update_top_games')} `<message>` — Force an immediate refresh on a live tracker.\n"
                     f"• {fmt(self.bot, 'config', 'remove_top_games')} `<message>` — Stop tracking and delete a live top games message.\n"
+                    f"• {fmt(self.bot, 'config', 'server_overview')} — View subscription details for members in the server.\n"
+                ),
+                inline=False
+            )
+
+            embed.add_field(
+                name="Server Configuration",
+                value=(
                     f"• {fmt(self.bot, 'config', 'set_lfg_channels')} `<mode> [channel]` — Allow all channels or add whitelisted channels.\n"
                     f"• {fmt(self.bot, 'config', 'remove_lfg_channels')} `<mode> [channel]` — Disable all channels or remove a whitelisted channel.\n"
                     f"• {fmt(self.bot, 'config', 'view_lfg_channels')} — View current LFG channel configuration.\n"
-                    f"• {fmt(self.bot, 'config', 'server_overview')} — View subscription details for members in the server."
                     f"• {fmt(self.bot, 'config', 'setup_quickstart')} — Post a Quickstart Guide embed.\n"
                     f"• {fmt(self.bot, 'config', 'remove_quickstart')} `<message>` — Remove a Quickstart Guide message.\n"
-                    f"• {fmt(self.bot, 'config', 'update_quickstart')} `[message]` — Reload the contents of all quickstart messages, or a specific message (in case of an update)."
+                    f"• {fmt(self.bot, 'config', 'update_quickstart')} `[message]` — Reload Quickstart messages."
                 ),
                 inline=False
             )
