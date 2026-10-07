@@ -12,6 +12,7 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 * **IGDB Database Integration:** Autocomplete and search millions of games directly from IGDB, automatically resolving special/deluxe editions to base games.
 * **Live Top Games Leaderboard:** Post dynamic, self-updating embed trackers displaying the server's most popular games.
 * **Custom Ping Templates:** Customize individual ping formatting and templates to suit your style.
+* **Server Anti-Spam Controls:** Per-game ping cooldowns and optional allowed-ping roles help servers prevent repeated LFG notification spam.
 * **Privacy & Data Ownership:** Native `/delete_all_my_data`, `/delete_my_subscriptions`, and `/unsubscribe` commands give users total control over their stored preferences.
 * **Docker Ready:** Multi-stage Docker deployment setup with SQLite database persistence.
 
@@ -26,7 +27,7 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 | `/unsubscribe <game>`                   | Unsubscribe from active notifications for a game.                                                 |
 | `/user_subscriptions [user] [public]`   | View active game subscriptions for yourself or another member.                                    |
 | `/game_info <game> [public]`            | Get details, genres, and cover image for a game.                                                  |
-| `/ping_game <game> [public]`            | Send an LFG ping mentioning all subscribers of a game.                                            |
+| `/ping_game <game> [note]`              | Send an LFG ping mentioning all subscribers of a game, with an optional note.                       |
 | `/quiet_mode [enabled] [scope]`         | Mute/unmute LFG notifications globally or specifically for the current server.                    |
 | `/show_subscribers <game>`              | View subscribers for a game without triggering a ping.                                            |
 | `/top_games [limit] [public]`           | View the most subscribed games on the server.                                                     |
@@ -51,10 +52,19 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 | `/config set_lfg_channels <mode> [channel]`           | Configure LFG mode (`all` or `whitelist`) and add channels marked with `✅`.                                                                                        |
 | `/config remove_lfg_channels <mode> [channel]`        | Set mode to disable LFG server-wide (`none`) or remove specific whitelisted channels.                                                                              |
 | `/config view_lfg_channels`                           | View current LFG channel configuration embed.                                                                                                                      |
-| `/config server_overview`                             | View subscription details for members in the server where the command is called.                                                                                   |                                                                                  |
+| `/config ping_cooldown [minutes]`                     | View or set the per-game server ping cooldown. Default: `0.5` minutes (30 seconds). Decimal values are supported; `0` disables it.                                 |
+| `/config ping_roles <action> [role]`                  | Restrict `/ping_game` to configured server roles, remove/view restrictions, or allow everyone. Default: everyone may ping.                                         |
+| `/config server_overview`                             | View subscription details for members in the server where the command is called.                                                                                   |
 | `/config setup_quickstart`                            | Post a Quickstart Guide embed.                                                                                                                                     |
 | `/config remove_quickstart <message>`                 | Remove a Quickstart Guide message.                                                                                                                                 |
 | `/config update_quickstart [message]`                 | Reload the contents of all quickstart messages, or a specific message (in case of an update)                                                                       |
+
+
+### LFG Ping Defaults
+
+* **Per-game cooldown:** By default, the same game can be pinged once every **30 seconds** per server. Administrators can change this with `/config ping_cooldown`; setting it to `0` disables the per-game cooldown.
+* **Who may ping:** By default, **everyone** may use `/ping_game` in allowed LFG channels. Administrators can restrict the command to one or more roles with `/config ping_roles`.
+* These server/game protections are separate from any per-user command cooldowns and from LFG channel restrictions.
 
 ---
 
@@ -139,7 +149,7 @@ python bot.py
 
 ## License & Privacy
 
-This project stores minimal user data (Discord User IDs, game preferences, and channel IDs for server trackers) strictly required for bot functionality. Read the full details in [`Privacy Policy.md`](./Privacy%20Policy.md).
+This project stores minimal user and server configuration data (including Discord User IDs, game preferences, tracker/channel IDs, configured role IDs, and per-game cooldown state) strictly required for bot functionality. Read the full details in [`Privacy Policy.md`](./Privacy%20Policy.md).
 
 ## Credits & Acknowledgements
 
