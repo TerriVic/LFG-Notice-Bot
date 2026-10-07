@@ -234,25 +234,50 @@ class OwnerCommands(commands.Cog):
             ephemeral=True
         )
 
-    @owner_group.command(name="delete_all_user_data", description="Permanently delete all data and settings for a specific user")
+    @owner_group.command(
+        name="delete_all_user_data",
+        description="Permanently delete all data and settings for a specific user"
+    )
     @is_bot_owner()
-    async def admin_delete_all_user_data(self, interaction: discord.Interaction, user: discord.User):
+    async def admin_delete_all_user_data(
+            self,
+            interaction: discord.Interaction,
+            user: discord.User
+    ):
         async def do_delete_all_user_data(_inter: discord.Interaction):
             async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute("DELETE FROM subscriptions WHERE user_id = ?", (user.id,))
-                await db.execute("DELETE FROM user_settings WHERE user_id = ?", (user.id,))
+                await db.execute(
+                    "DELETE FROM subscriptions WHERE user_id = ?",
+                    (user.id,)
+                )
+                await db.execute(
+                    "DELETE FROM user_settings WHERE user_id = ?",
+                    (user.id,)
+                )
+                await db.execute(
+                    "DELETE FROM user_guild_settings WHERE user_id = ?",
+                    (user.id,)
+                )
                 await db.commit()
 
         view = GenericConfirmationView(
             author_id=interaction.user.id,
             confirm_label="Delete All Data",
-            confirm_message=f"🗑️ **All subscriptions and custom settings for {user.mention} have been permanently deleted.**",
-            cancel_message=f"Action canceled. Data for {user.mention} remains untouched.",
+            confirm_message=(
+                f"🗑️ **All subscriptions and user settings for "
+                f"{user.mention} have been permanently deleted.**"
+            ),
+            cancel_message=(
+                f"Action canceled. Data for {user.mention} survives another day."
+            ),
             on_confirm=do_delete_all_user_data
         )
 
         await interaction.response.send_message(
-            f"⚠️ **Are you sure you want to delete ALL data for {user.mention}?**\nThis will permanently purge their subscriptions and custom ping settings.",
+            f"⚠️ **Are you sure you want to delete ALL data for "
+            f"{user.mention}?**\n"
+            "This will permanently purge their subscriptions, custom settings, "
+            "and server-specific quiet-mode preferences.",
             view=view,
             ephemeral=True
         )

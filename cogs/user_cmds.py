@@ -513,24 +513,42 @@ class UserCommands(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="delete_all_my_data", description="Permanently delete all your data and settings (e.g., ping templates).")
+    @app_commands.command(
+        name="delete_all_my_data",
+        description="Permanently delete all your data and settings (e.g., ping templates)."
+    )
     async def delete_all_my_data(self, interaction: discord.Interaction):
         async def do_delete_all(_inter: discord.Interaction):
             async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute("DELETE FROM subscriptions WHERE user_id = ?", (interaction.user.id,))
-                await db.execute("DELETE FROM user_settings WHERE user_id = ?", (interaction.user.id,))
+                await db.execute(
+                    "DELETE FROM subscriptions WHERE user_id = ?",
+                    (interaction.user.id,)
+                )
+                await db.execute(
+                    "DELETE FROM user_settings WHERE user_id = ?",
+                    (interaction.user.id,)
+                )
+                await db.execute(
+                    "DELETE FROM user_guild_settings WHERE user_id = ?",
+                    (interaction.user.id,)
+                )
                 await db.commit()
 
         view = GenericConfirmationView(
             author_id=interaction.user.id,
             confirm_label="Delete All Data",
-            confirm_message="🗑️ **All your subscriptions and custom settings have been permanently deleted.**",
-            cancel_message="Action canceled. Your data remains untouched.",
+            confirm_message=(
+                "🗑️ **All your subscriptions and user settings "
+                "have been permanently deleted.**"
+            ),
+            cancel_message="Action canceled. Your data survives another day.",
             on_confirm=do_delete_all
         )
 
         await interaction.response.send_message(
-            "⚠️ **Are you sure you want to delete ALL your data?**\nThis will remove subscriptions and custom ping settings.",
+            "⚠️ **Are you sure you want to delete ALL your data?**\n"
+            "This will remove your subscriptions, custom settings, "
+            "and server-specific quiet-mode preferences.",
             view=view,
             ephemeral=True
         )

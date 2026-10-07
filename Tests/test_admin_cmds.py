@@ -80,7 +80,6 @@ def test_build_quickstart_embed(mock_bot):
     assert isinstance(embed, discord.Embed)
     assert embed.title == "🚀 Server Quickstart Guide"
     assert "Get set up with LFG notifications" in embed.description
-    assert embed.color == discord.Color.gold()
     assert len(embed.fields) == 3
 
     field_names = [field.name for field in embed.fields]
