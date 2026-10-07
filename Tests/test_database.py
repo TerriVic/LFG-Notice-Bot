@@ -23,12 +23,14 @@ async def test_init_db_creates_all_tables(tmp_path, monkeypatch):
         async with db.execute("SELECT name FROM sqlite_master WHERE type='table';") as cursor:
             tables = [row[0] for row in await cursor.fetchall()]
 
-    # Verify key tables exist
+    # Verify all required tables exist
     assert "igdb_games" in tables
     assert "subscriptions" in tables
     assert "user_settings" in tables
+    assert "user_guild_settings" in tables
     assert "guild_lfg_settings" in tables
-
+    assert "quickstart_messages" in tables
+    assert "live_top_games" in tables
 
 # -----------------------------------------------------------------------------
 # 2. Tests for Dynamic Column Migration (`ensure_columns`)
@@ -212,3 +214,86 @@ async def test_init_db_repairs_orphan_subscriptions(mock_post, mock_getenv, tmp_
     assert row[0] == 999
     assert row[1] == "Orphaned Game"
     assert row[2] == 1600000000
+
+@pytest.mark.asyncio
+async def test_init_db_creates_current_schema(tmp_path, monkeypatch):
+    """Verify a brand-new database contains all columns required by the current bot."""
+    test_db_path = tmp_path / "test_current_schema.sqlite"
+    monkeypatch.setattr("database.DB_PATH", str(test_db_path))
+
+    await init_db()
+
+    async with aiosqlite.connect(test_db_path) as db:
+        async with db.execute("PRAGMA table_info(igdb_games);") as cursor:
+            igdb_columns = {row[1] for row in await cursor.fetchall()}
+
+        async with db.execute("PRAGMA table_info(guild_lfg_settings);") as cursor:
+            lfg_columns = {row[1] for row in await cursor.fetchall()}
+
+        async with db.execute("PRAGMA table_info(live_top_games);") as cursor:
+            live_columns = {row[1] for row in await cursor.fetchall()}
+
+    assert "total_rating_count" in igdb_columns
+
+    assert "mode" in lfg_columns
+    assert "whitelisted_channels" in lfg_columns
+
+    assert {
+        "message_id",
+        "guild_id",
+        "channel_id",
+        "entry_limit",
+        "update_interval",
+        "last_updated",
+        "created_at",
+    }.issubset(live_columns)
+
+@pytest.mark.asyncio
+async def test_init_db_migrates_legacy_schema(tmp_path, monkeypatch):
+    """Verify init_db upgrades older bot schemas without deleting existing data."""
+    test_db_path = tmp_path / "test_legacy_schema.sqlite"
+    monkeypatch.setattr("database.DB_PATH", str(test_db_path))
+
+    async with aiosqlite.connect(test_db_path) as db:
+        await db.execute("""
+                         CREATE TABLE igdb_games (
+                                                     id INTEGER PRIMARY KEY,
+                                                     name TEXT NOT NULL,
+                                                     updated_at INTEGER NOT NULL,
+                                                     is_multiplayer INTEGER DEFAULT 0
+                         );
+                         """)
+
+        await db.execute("""
+                         CREATE TABLE guild_lfg_settings (
+                                                             guild_id INTEGER PRIMARY KEY,
+                                                             lfg_channel_id INTEGER DEFAULT NULL
+                         );
+                         """)
+
+        await db.execute(
+            "INSERT INTO guild_lfg_settings (guild_id, lfg_channel_id) VALUES (?, ?)",
+            (12345, 67890)
+        )
+
+        await db.commit()
+
+    await init_db()
+
+    async with aiosqlite.connect(test_db_path) as db:
+        async with db.execute("PRAGMA table_info(igdb_games);") as cursor:
+            igdb_columns = {row[1] for row in await cursor.fetchall()}
+
+        async with db.execute("PRAGMA table_info(guild_lfg_settings);") as cursor:
+            lfg_columns = {row[1] for row in await cursor.fetchall()}
+
+        async with db.execute(
+                "SELECT guild_id FROM guild_lfg_settings WHERE guild_id = ?",
+                (12345,)
+        ) as cursor:
+            preserved_row = await cursor.fetchone()
+
+    assert "total_rating_count" in igdb_columns
+    assert "mode" in lfg_columns
+    assert "whitelisted_channels" in lfg_columns
+    assert preserved_row == (12345,)
