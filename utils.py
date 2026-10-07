@@ -710,7 +710,7 @@ def build_quickstart_embed(bot: commands.Bot) -> discord.Embed:
     embed = discord.Embed(
         title="🚀 Server Quickstart Guide",
         description="Get set up with LFG notifications and start finding teammates in 3 easy steps!",
-        color=discord.Color.gold()
+        color=discord.Color.blue()
     )
     embed.add_field(
         name="1️⃣ Join Game Alerts",
