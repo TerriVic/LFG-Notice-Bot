@@ -215,10 +215,35 @@ async def test_admin_delete_all_user_data(mock_view_class, owner_cog, mock_inter
 
     await on_confirm_callback(mock_interaction)
 
-    # Verify both tables are deleted from
+    # Verify all user data tables are deleted from
     db_calls = mock_db.execute.call_args_list
+
     assert any("DELETE FROM subscriptions" in str(call) for call in db_calls)
     assert any("DELETE FROM user_settings" in str(call) for call in db_calls)
+    assert any("DELETE FROM user_guild_settings" in str(call) for call in db_calls)
+
+    delete_calls = [
+        call for call in mock_db.execute.call_args_list
+        if "DELETE FROM" in call.args[0]
+    ]
+
+    assert any(
+        "DELETE FROM subscriptions" in call.args[0]
+        and call.args[1] == (444,)
+        for call in delete_calls
+    )
+
+    assert any(
+        "DELETE FROM user_settings" in call.args[0]
+        and call.args[1] == (444,)
+        for call in delete_calls
+    )
+
+    assert any(
+        "DELETE FROM user_guild_settings" in call.args[0]
+        and call.args[1] == (444,)
+        for call in delete_calls
+    )
 
 @pytest.mark.asyncio
 async def test_admin_overview(owner_cog, mock_interaction, mock_db_connect):

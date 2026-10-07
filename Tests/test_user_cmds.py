@@ -821,38 +821,76 @@ async def test_delete_my_subscriptions(setup_test_db):
 
 @pytest.mark.asyncio
 async def test_delete_all_my_data(setup_test_db):
-    """Test delete_all_my_data removes both subscriptions and user settings upon confirmation."""
+    """Test delete_all_my_data removes all user-owned data upon confirmation."""
     interaction = make_mock_interaction(user_id=101)
     cog = UserCommands(bot=MagicMock())
 
-    # Seed subscription and user settings for user 101
+    # Seed all types of user-owned data
     async with aiosqlite.connect(setup_test_db) as db:
-        await db.execute("INSERT INTO subscriptions (user_id, game_id) VALUES (?, ?)", (101, 1))
         await db.execute(
-            "INSERT OR REPLACE INTO user_settings (user_id, guild_id, ping_template) VALUES (?, 0, ?)",
+            "INSERT INTO subscriptions (user_id, game_id) VALUES (?, ?)",
+            (101, 1)
+        )
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO user_settings
+                (user_id, guild_id, ping_template)
+            VALUES (?, 0, ?)
+            """,
             (101, "Custom template")
         )
+
+        # Seed multiple per-server quiet-mode overrides
+        await db.execute(
+            """
+            INSERT INTO user_guild_settings
+                (user_id, guild_id, quiet_mode)
+            VALUES (?, ?, ?)
+            """,
+            (101, 999, 1)
+        )
+        await db.execute(
+            """
+            INSERT INTO user_guild_settings
+                (user_id, guild_id, quiet_mode)
+            VALUES (?, ?, ?)
+            """,
+            (101, 1234, 0)
+        )
+
         await db.commit()
 
-    # Call command
     await cog.delete_all_my_data.callback(cog, interaction)
 
     interaction.response.send_message.assert_awaited_once()
     view = interaction.response.send_message.call_args.kwargs.get("view")
 
-    # Confirm deletion
     if hasattr(view, "on_confirm"):
         await view.on_confirm(interaction)
 
-    # Verify both subscriptions and settings are wiped
+    # Verify ALL user-owned data is gone
     async with aiosqlite.connect(setup_test_db) as db:
-        async with db.execute("SELECT * FROM subscriptions WHERE user_id = ?", (101,)) as cursor:
+        async with db.execute(
+                "SELECT * FROM subscriptions WHERE user_id = ?",
+                (101,)
+        ) as cursor:
             sub_rows = await cursor.fetchall()
-        async with db.execute("SELECT * FROM user_settings WHERE user_id = ?", (101,)) as cursor:
+
+        async with db.execute(
+                "SELECT * FROM user_settings WHERE user_id = ?",
+                (101,)
+        ) as cursor:
             setting_rows = await cursor.fetchall()
+
+        async with db.execute(
+                "SELECT * FROM user_guild_settings WHERE user_id = ?",
+                (101,)
+        ) as cursor:
+            guild_setting_rows = await cursor.fetchall()
 
     assert len(sub_rows) == 0
     assert len(setting_rows) == 0
+    assert len(guild_setting_rows) == 0
 
 
 @pytest.mark.asyncio
