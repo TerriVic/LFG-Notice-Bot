@@ -654,6 +654,238 @@ class AdminCommands(commands.Cog):
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
+    @mod_group.command(
+        name="ping_cooldown",
+        description="View or set how often the same game may be pinged in this server"
+    )
+    @app_commands.describe(
+        minutes="Cooldown in minutes (default: 0.5 / 30s; use 0 to disable)"
+    )
+    @is_owner_or_moderator()
+    async def ping_cooldown(
+            self,
+            interaction: discord.Interaction,
+            minutes: typing.Optional[app_commands.Range[float, 0.0, 1440.0]] = None
+    ):
+        if not interaction.guild:
+            await interaction.response.send_message("This command must be run inside a server.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        if minutes is None:
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute(
+                        "SELECT game_ping_cooldown_seconds FROM guild_lfg_settings WHERE guild_id = ?",
+                        (interaction.guild.id,)
+                ) as cursor:
+                    row = await cursor.fetchone()
+
+            cooldown_seconds = row[0] if row and row[0] is not None else 30
+            if cooldown_seconds <= 0:
+                description = (
+                    "Disabled — the same game may be pinged again immediately.\n"
+                    "-# Default: disabled (0 minutes)."
+                )
+            else:
+                cooldown_minutes = cooldown_seconds / 60
+                display_minutes = f"{cooldown_minutes:g}"
+                minute_unit = "minute" if cooldown_minutes == 1 else "minutes"
+                second_unit = "second" if cooldown_seconds == 1 else "seconds"
+                description = (
+                    f"The same game may be pinged once every **{display_minutes} {minute_unit}** "
+                    f"(**{cooldown_seconds} {second_unit}**).\n"
+                    "-# Default: 30 seconds (0.5 minutes)."
+                )
+
+            await interaction.followup.send(
+                f"⏱️ **Per-game ping cooldown:** {description}",
+                ephemeral=True
+            )
+            return
+
+        cooldown_seconds = int(round(minutes * 60))
+
+        # SQLite stores cooldowns as whole seconds. Extremely small positive
+        # values that round below one second are not useful, so reject them.
+        if minutes > 0 and cooldown_seconds < 1:
+            await interaction.followup.send(
+                "❌ The smallest supported positive cooldown is **1 second** "
+                "(`0.0167` minutes).",
+                ephemeral=True
+            )
+            return
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """
+                INSERT INTO guild_lfg_settings (guild_id, game_ping_cooldown_seconds)
+                VALUES (?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    game_ping_cooldown_seconds = excluded.game_ping_cooldown_seconds
+                """,
+                (interaction.guild.id, cooldown_seconds)
+            )
+
+            # Disabling the feature should also reset old cooldown history so
+            # re-enabling it later starts with a clean slate.
+            if cooldown_seconds == 0:
+                await db.execute(
+                    "DELETE FROM guild_game_ping_state WHERE guild_id = ?",
+                    (interaction.guild.id,)
+                )
+
+            await db.commit()
+
+        if cooldown_seconds == 0:
+            message = (
+                "✅ Per-game ping cooldowns are now **disabled** for this server.\n"
+                "-# Default: disabled (0 minutes)."
+            )
+        else:
+            cooldown_minutes = cooldown_seconds / 60
+            display_minutes = f"{cooldown_minutes:g}"
+            minute_unit = "minute" if cooldown_minutes == 1 else "minutes"
+            second_unit = "second" if cooldown_seconds == 1 else "seconds"
+            message = (
+                f"✅ The same game can now be pinged once every "
+                f"**{display_minutes} {minute_unit}** "
+                f"(**{cooldown_seconds} {second_unit}**) in this server."
+            )
+
+        await interaction.followup.send(message, ephemeral=True)
+
+    @mod_group.command(
+        name="ping_roles",
+        description="Control which roles may use /ping_game (default: everyone)"
+    )
+    @app_commands.describe(
+        action="Add/remove a role, allow everyone, or view the current setting",
+        role="Role to add or remove (required for Add/Remove)"
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="Add Allowed Role", value="add"),
+        app_commands.Choice(name="Remove Allowed Role", value="remove"),
+        app_commands.Choice(name="Allow Everyone", value="allow_all"),
+        app_commands.Choice(name="View Allowed Roles", value="view")
+    ])
+    @is_owner_or_moderator()
+    async def ping_roles(
+            self,
+            interaction: discord.Interaction,
+            action: app_commands.Choice[str],
+            role: typing.Optional[discord.Role] = None
+    ):
+        if not interaction.guild:
+            await interaction.response.send_message("This command must be run inside a server.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        selected_action = action.value
+
+        if selected_action in {"add", "remove"} and role is None:
+            await interaction.followup.send(
+                "❌ Please select a role for this action.",
+                ephemeral=True
+            )
+            return
+
+        if role is not None and role.id == interaction.guild.id:
+            await interaction.followup.send(
+                "ℹ️ `@everyone` already means everyone can ping. Use **Allow Everyone** instead.",
+                ephemeral=True
+            )
+            return
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            if selected_action == "add":
+                cursor = await db.execute(
+                    "INSERT OR IGNORE INTO guild_ping_roles (guild_id, role_id) VALUES (?, ?)",
+                    (interaction.guild.id, role.id)
+                )
+                await db.commit()
+
+                if cursor.rowcount == 0:
+                    message = f"ℹ️ {role.mention} is already allowed to use `/ping_game`."
+                else:
+                    message = (
+                        f"✅ Added {role.mention}. Members with this role may now use `/ping_game`."
+                    )
+
+            elif selected_action == "remove":
+                cursor = await db.execute(
+                    "DELETE FROM guild_ping_roles WHERE guild_id = ? AND role_id = ?",
+                    (interaction.guild.id, role.id)
+                )
+                await db.commit()
+
+                if cursor.rowcount == 0:
+                    message = f"ℹ️ {role.mention} was not in the allowed ping-role list."
+                else:
+                    async with db.execute(
+                            "SELECT 1 FROM guild_ping_roles WHERE guild_id = ? LIMIT 1",
+                            (interaction.guild.id,)
+                    ) as check_cursor:
+                        has_remaining_roles = await check_cursor.fetchone()
+
+                    if has_remaining_roles:
+                        message = f"🗑️ Removed {role.mention} from the allowed ping-role list."
+                    else:
+                        message = (
+                            f"🗑️ Removed {role.mention}. No restricted roles remain, so "
+                            "**everyone may use `/ping_game` again**."
+                        )
+
+            elif selected_action == "allow_all":
+                await db.execute(
+                    "DELETE FROM guild_ping_roles WHERE guild_id = ?",
+                    (interaction.guild.id,)
+                )
+                await db.commit()
+                message = "✅ Ping-role restrictions cleared. **Everyone may use `/ping_game`.**"
+
+            else:  # view
+                async with db.execute(
+                        "SELECT role_id FROM guild_ping_roles WHERE guild_id = ? ORDER BY role_id",
+                        (interaction.guild.id,)
+                ) as cursor:
+                    role_rows = await cursor.fetchall()
+
+                configured_ids = [row[0] for row in role_rows]
+                valid_roles = []
+                stale_ids = []
+                for role_id in configured_ids:
+                    role_obj = interaction.guild.get_role(role_id)
+                    if role_obj:
+                        valid_roles.append(role_obj)
+                    else:
+                        stale_ids.append(role_id)
+
+                if stale_ids:
+                    await db.executemany(
+                        "DELETE FROM guild_ping_roles WHERE guild_id = ? AND role_id = ?",
+                        [(interaction.guild.id, role_id) for role_id in stale_ids]
+                    )
+                    await db.commit()
+
+                if not valid_roles:
+                    message = (
+                        "👥 **Allowed ping roles:** Everyone may use `/ping_game`.\n"
+                        "-# Default: everyone may ping until one or more allowed roles are added."
+                    )
+                else:
+                    role_mentions = " ".join(role_obj.mention for role_obj in valid_roles)
+                    message = (
+                        "👥 **Allowed ping roles:** " + role_mentions +
+                        "\n-# Bot owner and server moderators can always bypass this restriction."
+                    )
+
+        await interaction.followup.send(
+            message,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none()
+        )
+
     @mod_group.command(name="setup_quickstart", description="Post a permanent Quickstart Guide embed in this channel")
     @is_owner_or_moderator()
     async def setup_quickstart(self, interaction: discord.Interaction):
