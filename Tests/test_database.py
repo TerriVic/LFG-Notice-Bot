@@ -364,9 +364,70 @@ async def test_claim_game_ping_cooldown_blocks_until_expiry(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_claim_game_ping_cooldown_disabled_does_not_create_state(tmp_path, monkeypatch):
+async def test_claim_game_ping_cooldown_disabled_does_not_create_state(
+        tmp_path,
+        monkeypatch
+):
     test_db_path = tmp_path / "test_ping_cooldown_disabled.sqlite"
     monkeypatch.setattr("database.DB_PATH", str(test_db_path))
+
+    await init_db()
+
+    async with aiosqlite.connect(test_db_path) as db:
+        await db.execute(
+            "INSERT INTO igdb_games (id, name, updated_at) VALUES (?, ?, ?)",
+            (1, "Portal 2", 1600000000)
+        )
+
+        # Explicitly disable the per-game cooldown for this guild.
+        await db.execute(
+            """
+            INSERT INTO guild_lfg_settings (
+                guild_id,
+                game_ping_cooldown_seconds
+            )
+            VALUES (?, ?)
+            """,
+            (999, 0)
+        )
+
+        await db.commit()
+
+    assert await claim_game_ping_cooldown(
+        999,
+        1,
+        now=1000
+    ) == (True, 0)
+
+    assert await claim_game_ping_cooldown(
+        999,
+        1,
+        now=1001
+    ) == (True, 0)
+
+    # Disabled cooldown should not create any persistent cooldown state.
+    async with aiosqlite.connect(test_db_path) as db:
+        async with db.execute(
+                """
+                SELECT COUNT(*)
+                FROM guild_game_ping_state
+                WHERE guild_id = ?
+                  AND game_id = ?
+                """,
+                (999, 1)
+        ) as cursor:
+            count = (await cursor.fetchone())[0]
+
+    assert count == 0
+
+@pytest.mark.asyncio
+async def test_claim_game_ping_cooldown_unconfigured_uses_30_second_default(
+        tmp_path,
+        monkeypatch
+):
+    test_db_path = tmp_path / "test_ping_cooldown_default.sqlite"
+    monkeypatch.setattr("database.DB_PATH", str(test_db_path))
+
     await init_db()
 
     async with aiosqlite.connect(test_db_path) as db:
@@ -376,15 +437,26 @@ async def test_claim_game_ping_cooldown_disabled_does_not_create_state(tmp_path,
         )
         await db.commit()
 
-    assert await claim_game_ping_cooldown(999, 1, now=1000) == (True, 0)
-    assert await claim_game_ping_cooldown(999, 1, now=1001) == (True, 0)
+    # First ping succeeds.
+    assert await claim_game_ping_cooldown(
+        999,
+        1,
+        now=1000
+    ) == (True, 0)
 
-    async with aiosqlite.connect(test_db_path) as db:
-        async with db.execute("SELECT COUNT(*) FROM guild_game_ping_state") as cursor:
-            count = (await cursor.fetchone())[0]
+    # One second later, 29 seconds remain.
+    assert await claim_game_ping_cooldown(
+        999,
+        1,
+        now=1001
+    ) == (False, 29)
 
-    assert count == 0
-
+    # At exactly 30 seconds, it is available again.
+    assert await claim_game_ping_cooldown(
+        999,
+        1,
+        now=1030
+    ) == (True, 0)
 
 @pytest.mark.asyncio
 async def test_get_guild_ping_role_ids(tmp_path, monkeypatch):

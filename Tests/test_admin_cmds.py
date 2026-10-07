@@ -1104,15 +1104,25 @@ async def test_ping_cooldown_disable_clears_state(admin_cog, mock_interaction, m
 
 
 @pytest.mark.asyncio
-async def test_ping_cooldown_view_unconfigured_explains_default(admin_cog, mock_interaction, mock_db_connect):
+async def test_ping_cooldown_view_unconfigured_explains_default(
+        admin_cog,
+        mock_interaction,
+        mock_db_connect
+):
     _, mock_cursor = mock_db_connect
     mock_cursor.fetchone.return_value = None
 
-    await admin_cog.ping_cooldown.callback(admin_cog, mock_interaction, minutes=None)
+    await admin_cog.ping_cooldown.callback(
+        admin_cog,
+        mock_interaction,
+        minutes=None
+    )
 
     message = mock_interaction.followup.send.await_args.args[0]
-    assert "Default: disabled (0 minutes)" in message
 
+    assert "Default: 30 seconds (0.5 minutes)." in message
+    assert "**0.5 minutes**" in message
+    assert "**30 seconds**" in message
 
 @pytest.mark.asyncio
 async def test_ping_roles_view_unconfigured_explains_default(admin_cog, mock_interaction, mock_db_connect):
