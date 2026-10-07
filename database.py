@@ -38,7 +38,8 @@ async def init_db():
                                                                    category INTEGER DEFAULT 0,
                                                                    parent_game_id INTEGER DEFAULT NULL,
                                                                    version_parent_id INTEGER DEFAULT NULL,
-                                                                   is_multiplayer INTEGER DEFAULT 0
+                                                                   is_multiplayer INTEGER DEFAULT 0,
+                                                                   total_rating_count INTEGER DEFAULT 0
                          );
                          """)
 
@@ -56,7 +57,8 @@ async def init_db():
         await db.execute("""
                          CREATE TABLE IF NOT EXISTS guild_lfg_settings (
                                                                            guild_id INTEGER PRIMARY KEY,
-                                                                           lfg_channel_id INTEGER DEFAULT NULL
+                                                                           mode TEXT NOT NULL DEFAULT 'all',
+                                                                           whitelisted_channels TEXT NOT NULL DEFAULT ''
                          );
                          """)
 
@@ -71,6 +73,18 @@ async def init_db():
                          );
                          """)
 
+        # 5. Live Top Games Messages Table
+        await db.execute("""
+                 CREATE TABLE IF NOT EXISTS live_top_games (
+                                                               message_id INTEGER PRIMARY KEY,
+                                                               guild_id INTEGER NOT NULL,
+                                                               channel_id INTEGER NOT NULL,
+                                                               entry_limit INTEGER NOT NULL DEFAULT 10,
+                                                               update_interval REAL NOT NULL DEFAULT 1.0,
+                                                               last_updated INTEGER NOT NULL DEFAULT 0,
+                                                               created_at INTEGER NOT NULL DEFAULT 0
+                 );
+                 """)
         # Commit initial table creations so they exist for subsequent checks/migrations
         await db.commit()
 
@@ -127,6 +141,7 @@ async def init_db():
                          );
                          """)
         await db.commit()
+
         # ---------------------------------------------------------------------
         # STEP 3: Ensure missing columns & indexes exist
         # ---------------------------------------------------------------------
@@ -134,10 +149,34 @@ async def init_db():
             "first_release_date": "INTEGER DEFAULT NULL",
             "is_multiplayer": "INTEGER DEFAULT 0",
             "parent_game_id": "INTEGER DEFAULT NULL",
-            "version_parent_id": "INTEGER DEFAULT NULL"
+            "version_parent_id": "INTEGER DEFAULT NULL",
+            "total_rating_count": "INTEGER DEFAULT 0"
         })
 
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_igdb_multiplayer_name ON igdb_games(is_multiplayer, name);")
+        await ensure_columns(db, "guild_lfg_settings", {
+            "mode": "TEXT NOT NULL DEFAULT 'all'",
+            "whitelisted_channels": "TEXT NOT NULL DEFAULT ''"
+        })
+
+        await ensure_columns(db, "live_top_games", {
+            "guild_id": "INTEGER",
+            "channel_id": "INTEGER",
+            "entry_limit": "INTEGER NOT NULL DEFAULT 10",
+            "update_interval": "REAL NOT NULL DEFAULT 1.0",
+            "last_updated": "INTEGER NOT NULL DEFAULT 0",
+            "created_at": "INTEGER NOT NULL DEFAULT 0"
+        })
+
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS "
+            "idx_igdb_multiplayer_name ON igdb_games(is_multiplayer, name);"
+        )
+
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS "
+            "idx_live_top_games_guild ON live_top_games(guild_id);"
+        )
+
         await db.commit()
 
         # ---------------------------------------------------------------------
