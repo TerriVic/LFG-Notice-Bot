@@ -58,11 +58,32 @@ async def init_db():
                          CREATE TABLE IF NOT EXISTS guild_lfg_settings (
                                                                            guild_id INTEGER PRIMARY KEY,
                                                                            mode TEXT NOT NULL DEFAULT 'all',
-                                                                           whitelisted_channels TEXT NOT NULL DEFAULT ''
+                                                                           whitelisted_channels TEXT NOT NULL DEFAULT '',
+                                                                           game_ping_cooldown_seconds INTEGER NOT NULL DEFAULT 30
                          );
                          """)
 
-        # 4. Quickstart messages table
+        # 4. Per-Guild / Per-Game Ping Cooldown State
+        await db.execute("""
+                         CREATE TABLE IF NOT EXISTS guild_game_ping_state (
+                                                                             guild_id INTEGER NOT NULL,
+                                                                             game_id INTEGER NOT NULL,
+                                                                             last_ping_at INTEGER NOT NULL DEFAULT 0,
+                                                                             PRIMARY KEY (guild_id, game_id),
+                                                                             FOREIGN KEY (game_id) REFERENCES igdb_games (id) ON DELETE CASCADE
+                         );
+                         """)
+
+        # 5. Roles Allowed to Use LFG Pings
+        await db.execute("""
+                         CREATE TABLE IF NOT EXISTS guild_ping_roles (
+                                                                        guild_id INTEGER NOT NULL,
+                                                                        role_id INTEGER NOT NULL,
+                                                                        PRIMARY KEY (guild_id, role_id)
+                         );
+                         """)
+
+        # 6. Quickstart Messages Table
         # Quickstart Messages Table
         await db.execute("""
                          CREATE TABLE IF NOT EXISTS quickstart_messages (
@@ -73,7 +94,7 @@ async def init_db():
                          );
                          """)
 
-        # 5. Live Top Games Messages Table
+        # 7. Live Top Games Messages Table
         await db.execute("""
                  CREATE TABLE IF NOT EXISTS live_top_games (
                                                                message_id INTEGER PRIMARY KEY,
@@ -155,7 +176,8 @@ async def init_db():
 
         await ensure_columns(db, "guild_lfg_settings", {
             "mode": "TEXT NOT NULL DEFAULT 'all'",
-            "whitelisted_channels": "TEXT NOT NULL DEFAULT ''"
+            "whitelisted_channels": "TEXT NOT NULL DEFAULT ''",
+            "game_ping_cooldown_seconds": "INTEGER NOT NULL DEFAULT 30"
         })
 
         await ensure_columns(db, "live_top_games", {
@@ -231,6 +253,78 @@ async def init_db():
                     print(f"[DB Setup] Failed to repair orphan subscription: {e}")
 
     print("[DB Setup] Schema checked and migrated safely.")
+
+
+async def get_guild_ping_role_ids(guild_id: int) -> list[int]:
+    """Return configured role IDs allowed to call /ping_game in a guild."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+                "SELECT role_id FROM guild_ping_roles WHERE guild_id = ? ORDER BY role_id",
+                (guild_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+    return [row[0] for row in rows]
+
+
+async def claim_game_ping_cooldown(
+        guild_id: int,
+        game_id: int,
+        now: int | None = None
+) -> tuple[bool, int]:
+    """
+    Atomically claim the per-guild/per-game ping cooldown slot.
+
+    Returns (allowed, retry_after_seconds). When the configured cooldown is 0
+    or absent, the claim is always allowed and no state row is written.
+    """
+    current_time = int(time.time()) if now is None else int(now)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Serialize competing writers so two simultaneous users cannot both pass
+        # the read-before-write cooldown check.
+        await db.execute("BEGIN IMMEDIATE")
+
+        try:
+            async with db.execute(
+                    "SELECT game_ping_cooldown_seconds FROM guild_lfg_settings WHERE guild_id = ?",
+                    (guild_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            cooldown_seconds = max(0, int(row[0])) if row and row[0] is not None else 30
+
+            if cooldown_seconds == 0:
+                await db.commit()
+                return True, 0
+
+            async with db.execute(
+                    "SELECT last_ping_at FROM guild_game_ping_state WHERE guild_id = ? AND game_id = ?",
+                    (guild_id, game_id)
+            ) as cursor:
+                state_row = await cursor.fetchone()
+
+            if state_row:
+                elapsed = max(0, current_time - int(state_row[0]))
+                if elapsed < cooldown_seconds:
+                    await db.commit()
+                    return False, cooldown_seconds - elapsed
+
+            await db.execute(
+                """
+                INSERT INTO guild_game_ping_state (guild_id, game_id, last_ping_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(guild_id, game_id) DO UPDATE SET
+                    last_ping_at = excluded.last_ping_at
+                """,
+                (guild_id, game_id, current_time)
+            )
+            await db.commit()
+            return True, 0
+
+        except Exception:
+            await db.rollback()
+            raise
 
 
 async def auto_migrate_multiplayer_flags():
