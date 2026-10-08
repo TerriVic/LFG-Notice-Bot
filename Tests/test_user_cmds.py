@@ -48,6 +48,11 @@ def make_mock_interaction(user_id=12345, guild_id=999, channel_id=888):
     interaction.guild_id = guild_id
     interaction.channel_id = channel_id
 
+    # /ping_game now posts via the channel rather than the interaction webhook.
+    interaction.channel = MagicMock()
+    interaction.channel.send = AsyncMock()
+    interaction.delete_original_response = AsyncMock()
+
     # Mock Guild
     if guild_id:
         interaction.guild = MagicMock()
@@ -276,11 +281,22 @@ async def test_ping_game_success(setup_test_db):
             patch("cogs.user_cmds.resolve_to_base_game", new=AsyncMock(return_value=(1, "Portal 2"))):
         await cog.ping_game.callback(cog, caller_interaction, game="Portal 2", note="Let's play co-op!")
 
-    caller_interaction.followup.send.assert_called_once()
-    sent_msg = caller_interaction.followup.send.call_args[0][0]
+    caller_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    caller_interaction.channel.send.assert_awaited_once()
+    caller_interaction.delete_original_response.assert_awaited_once()
+    caller_interaction.followup.send.assert_not_awaited()
+
+    sent_msg = caller_interaction.channel.send.await_args.args[0]
     assert "<@202>" in sent_msg
     assert "Portal 2" in sent_msg
     assert "Let's play co-op!" in sent_msg
+
+    send_kwargs = caller_interaction.channel.send.await_args.kwargs
+    assert send_kwargs["silent"] is False
+    allowed_mentions = send_kwargs["allowed_mentions"]
+    assert allowed_mentions.users is True
+    assert allowed_mentions.roles is False
+    assert allowed_mentions.everyone is False
 
 @pytest.mark.asyncio
 @patch("cogs.user_cmds.is_lfg_allowed_in_channel", new_callable=AsyncMock)
@@ -337,11 +353,12 @@ async def test_ping_game_with_custom_template(mock_resolve, mock_lfg_allowed, se
     await cog.ping_game.callback(cog, interaction, game="Elden Ring", note="Need a tank")
 
     # 4. Assert
-    interaction.response.defer.assert_awaited_once()
-    interaction.followup.send.assert_awaited_once()
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    interaction.channel.send.assert_awaited_once()
+    interaction.delete_original_response.assert_awaited_once()
+    interaction.followup.send.assert_not_awaited()
 
-    call_args = interaction.followup.send.await_args
-    sent_msg = call_args[0][0]
+    sent_msg = interaction.channel.send.await_args.args[0]
 
     assert "Custom alert by <@101> for **Elden Ring**!" in sent_msg
     assert "<@102>" in sent_msg
@@ -360,9 +377,11 @@ async def test_ping_game_with_quiet_users(mock_resolve, mock_lfg_allowed, setup_
 
     interaction = make_mock_interaction(user_id=101, guild_id=999, channel_id=888)
 
-    # Mock guild member lookup
+    # Mock guild member lookup, including a real display name for quiet-mode text.
     sub_member = MagicMock()
-    interaction.guild.get_member = lambda uid: sub_member
+    sub_member.id = 202
+    sub_member.display_name = "QuietPlayer"
+    interaction.guild.get_member = lambda uid: sub_member if uid == 202 else None
 
     # 2. Seed Test Database with a quiet subscriber (user 202)
     async with aiosqlite.connect(setup_test_db) as db:
@@ -379,11 +398,15 @@ async def test_ping_game_with_quiet_users(mock_resolve, mock_lfg_allowed, setup_
     # 3. Act: Invoke ping_game
     await cog.ping_game.callback(cog, interaction, game="Portal 2", note="Let's play co-op!")
 
-    # 4. Assert: Verify the quiet mode footer text is appended correctly
-    interaction.followup.send.assert_called_once()
-    sent_msg = interaction.followup.send.call_args[0][0]
+    # 4. Quiet subscribers appear by name, not as actual Discord ping mentions.
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    interaction.channel.send.assert_awaited_once()
+    interaction.delete_original_response.assert_awaited_once()
+    interaction.followup.send.assert_not_awaited()
 
-    assert "<@202>" in sent_msg
+    sent_msg = interaction.channel.send.await_args.args[0]
+    assert "QuietPlayer" in sent_msg
+    assert "<@202>" not in sent_msg
     assert "has quiet mode turned on" in sent_msg
 
 # -----------------------------------------------------------------------------

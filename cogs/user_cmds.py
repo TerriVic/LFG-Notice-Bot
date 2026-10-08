@@ -215,7 +215,7 @@ class UserCommands(commands.Cog):
                 return
 
         # 2. Defer immediately to prevent Discord interaction timeout
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
 
         clean_game = game.strip().replace("’", "'").replace("‘", "'")
         current_guild_id = interaction.guild_id or 0
@@ -265,8 +265,9 @@ class UserCommands(commands.Cog):
         active_user_ids = [r[0] for r in rows if r[1] == 0]
         quiet_user_ids = [r[0] for r in rows if r[1] == 1]
 
-        # Format mentions for phantom badges
-        all_mentions = " ".join(f"<@{r[0]}>" for r in rows)
+        # Only active users are actual Discord mentions
+        active_mentions = " ".join(f"<@{uid}>" for uid in active_user_ids)
+
         caller_mention = interaction.user.mention
         formatted_game = f"**{official_name}**"
         clean_note = note.strip() if note else ""
@@ -279,32 +280,55 @@ class UserCommands(commands.Cog):
                 .replace("{caller}", caller_mention)
                 .replace("{user}", caller_mention)
                 .replace("{game}", formatted_game)
-                .replace("{mentions}", all_mentions)
+                .replace("{mentions}", active_mentions)
                 .replace("{note}", clean_note)
             )
+
             if clean_note and clean_note not in msg:
                 msg += f"\n> {clean_note}"
-            if all_mentions not in msg:
-                msg += f"\n{all_mentions}"
+
+            if active_mentions and active_mentions not in msg:
+                msg += f"\n{active_mentions}"
+
         else:
-            msg = f"{caller_mention} wants to play {formatted_game}! {all_mentions}"
+            msg = f"{caller_mention} wants to play {formatted_game}!"
+
+            if active_mentions:
+                msg += f" {active_mentions}"
+
             if clean_note:
                 msg += f"\n> {clean_note}"
 
+        # Quiet users are shown by display name, but are NOT actual mentions
         if quiet_user_ids:
-            quiet_mentions_str = ", ".join(f"<@{uid}>" for uid in quiet_user_ids)
-            verb = "has" if len(quiet_user_ids) == 1 else "have"
-            msg += f"\n\n-# {quiet_mentions_str} {verb} quiet mode turned on"
+            quiet_names = []
 
-        # Restrict notification pings strictly to active (non-quiet) users
-        allowed_users = [discord.Object(id=uid) for uid in active_user_ids]
+            for uid in quiet_user_ids:
+                member = interaction.guild.get_member(uid)
+                if member:
+                    quiet_names.append(member.display_name)
+
+            if quiet_names:
+                quiet_names_str = ", ".join(quiet_names)
+                verb = "has" if len(quiet_names) == 1 else "have"
+                msg += f"\n\n-# {quiet_names_str} {verb} quiet mode turned on"
+
+        # Process all user mentions that actually appear in the message.
+        # Since only active subscribers are represented as <@id>, only they get pinged.
         allowed_mentions = discord.AllowedMentions(
-            users=allowed_users if allowed_users else False,
+            users=True,
             roles=False,
             everyone=False
         )
 
-        await interaction.followup.send(msg, allowed_mentions=allowed_mentions)
+        # Send as a regular bot message, rather than an interaction webhook
+        await interaction.channel.send(
+            msg,
+            allowed_mentions=allowed_mentions,
+            silent=False
+        )
+
+        await interaction.delete_original_response()
 
     @app_commands.command(name="set_ping_template", description="Customize how your /ping_game calls look")
     @app_commands.describe(template="Your custom message. Placeholders: {caller}, {game}, {mentions}, {note}")
