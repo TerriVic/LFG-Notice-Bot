@@ -12,6 +12,8 @@ from discord.ext import commands
 
 from database import init_db, auto_migrate_multiplayer_flags
 from utils import get_bot_owner_id
+from igdb_client import igdb
+from contextlib import suppress
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
@@ -25,6 +27,7 @@ class GameBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.command_ids = {}
+        self._migration_task = None
 
     async def setup_hook(self):
         await init_db()
@@ -35,7 +38,19 @@ class GameBot(commands.Bot):
         await self.load_extension("cogs.admin_cmds")
         await self.load_extension("cogs.background_tasks")
 
-        asyncio.create_task(auto_migrate_multiplayer_flags())
+        self._migration_task = asyncio.create_task(auto_migrate_multiplayer_flags())
+
+    async def close(self):
+        try:
+            if self._migration_task is not None:
+                self._migration_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._migration_task
+            for name in list(self.extensions):
+                await self.unload_extension(name)
+            await super().close()
+        finally:
+            await igdb.close()
 
 client = GameBot(command_prefix="!", intents=intents)
 

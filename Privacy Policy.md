@@ -1,6 +1,6 @@
 # Privacy Policy for LFG Notice Bot
 
-**Last Updated:** October 2026
+**Last Updated:** October 9, 2026
 
 ## 1. Information We Collect
 LFG Notice Bot collects minimal data necessary to provide game subscription, ping notification, quiet mode, server anti-spam controls, and server leaderboard services:
@@ -22,11 +22,13 @@ Stored data is used exclusively to:
 * Enforce per-user and per-game command cooldowns, configured ping-role restrictions, and other command safety checks.
 
 ## 3. Data Storage & Security
-* All data is stored in a self-contained SQLite database hosted on our private server.
-* Data is never sold, rented, or shared with third-party services.
-* External requests to the IGDB/Twitch API are strictly for fetching game catalog metadata and do not contain user information.
+* Stored user preferences and server configuration are kept in a self-contained SQLite database hosted on our private server. Temporary game-search caches and Twitch app access tokens are held in the bot's memory.
+* Stored user preferences and server configuration are not sold or rented. The bot does not send Discord User IDs, subscription lists, server/channel IDs, custom templates, or ping notes to IGDB/Twitch.
+* Game catalog requests to IGDB include game search text, game names, or game IDs needed for autocomplete, game lookups, and catalog maintenance. Twitch authentication requests include the bot operator's application client ID and client secret; IGDB requests include the application client ID and access token. These application credentials are not credentials belonging to Discord users.
+* Requests to IGDB/Twitch are subject to those services' own data handling practices.
 
 ## 4. Data Retention & Removal
+* **Temporary Search Cache:** Successful raw game-search results and their query text are cached in memory for 60 seconds, with up to 256 query entries. Expired results are not reused. Entries may remain in memory until the next lookup, cache eviction, or shutdown; the cache is cleared on shutdown. This cache does not associate queries with Discord User IDs. Application access tokens are replaced when renewed and are not stored in the SQLite database.
 * **Self-Service Subscription Removal:** Running `/unsubscribe` for a game immediately deletes that subscription entry from the database.
 * **Template Reset:** Running `/reset_ping_template` clears your stored custom message template.
 * **Indicator Reset:** Running `/reset_subscribed_indicator` resets your autocomplete indicator to default (`⭐`).

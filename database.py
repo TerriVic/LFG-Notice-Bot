@@ -2,7 +2,7 @@ import asyncio
 import os
 import time
 
-import aiohttp
+from igdb_client import igdb
 import aiosqlite
 
 # Setup persistent data path
@@ -20,7 +20,6 @@ async def ensure_columns(db: aiosqlite.Connection, table_name: str, expected_col
     for col_name, col_type in expected_columns.items():
         if col_name not in existing_columns:
             await db.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type};")
-
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -212,14 +211,7 @@ async def init_db():
                               """) as cursor:
             missing_ids = [row[0] for row in await cursor.fetchall()]
 
-        client_id = os.getenv("TWITCH_CLIENT_ID")
-        access_token = os.getenv("TWITCH_ACCESS_TOKEN")
-
-        if missing_ids and client_id and access_token:
-            headers = {
-                "Client-ID": client_id,
-                "Authorization": f"Bearer {access_token}"
-            }
+        if missing_ids and igdb.configured:
             chunk_size = 500
             for i in range(0, len(missing_ids), chunk_size):
                 chunk = missing_ids[i:i + chunk_size]
@@ -227,33 +219,31 @@ async def init_db():
                 body = f"fields id, name, category, first_release_date; where id = ({ids_str}); limit {chunk_size};"
 
                 try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
-                            if resp.status == 200:
-                                games = await resp.json()
-                                updates = [
-                                    (
-                                        g["id"],
-                                        g["name"],
-                                        int(time.time()),
-                                        g.get("first_release_date"),
-                                        g.get("category", 0)
-                                    )
-                                    for g in games
-                                ]
-                                await db.executemany(
-                                    """
-                                    INSERT OR IGNORE INTO igdb_games (id, name, updated_at, first_release_date, category)
-                                    VALUES (?, ?, ?, ?, ?)
-                                    """,
-                                    updates
+                    async with igdb.post("https://api.igdb.com/v4/games", data=body) as resp:
+                        if resp.status == 200:
+                            games = await resp.json()
+                            updates = [
+                                (
+                                    g["id"],
+                                    g["name"],
+                                    int(time.time()),
+                                    g.get("first_release_date"),
+                                    g.get("category", 0)
                                 )
-                                await db.commit()
+                                for g in games
+                            ]
+                            await db.executemany(
+                                """
+                                INSERT OR IGNORE INTO igdb_games (id, name, updated_at, first_release_date, category)
+                                VALUES (?, ?, ?, ?, ?)
+                                """,
+                                updates
+                            )
+                            await db.commit()
                 except Exception as e:
                     print(f"[DB Setup] Failed to repair orphan subscription: {e}")
 
     print("[DB Setup] Schema checked and migrated safely.")
-
 
 async def get_guild_ping_role_ids(guild_id: int) -> list[int]:
     """Return configured role IDs allowed to call /ping_game in a guild."""
@@ -265,7 +255,6 @@ async def get_guild_ping_role_ids(guild_id: int) -> list[int]:
             rows = await cursor.fetchall()
 
     return [row[0] for row in rows]
-
 
 async def claim_game_ping_cooldown(
         guild_id: int,
@@ -326,12 +315,9 @@ async def claim_game_ping_cooldown(
             await db.rollback()
             raise
 
-
 async def auto_migrate_multiplayer_flags():
-    client_id = os.getenv("TWITCH_CLIENT_ID")
-    access_token = os.getenv("TWITCH_ACCESS_TOKEN")
 
-    if not client_id or not access_token:
+    if not igdb.configured:
         print("[Auto-Migration] Missing IGDB API credentials. Skipping backfill.")
         return
 
@@ -345,70 +331,62 @@ async def auto_migrate_multiplayer_flags():
     if total_to_fix > 0:
         print(f"[Auto-Migration] Found {total_to_fix} unclassified games. Starting background backfill...")
 
-        headers = {
-            "Client-ID": client_id,
-            "Authorization": f"Bearer {access_token}"
-        }
-
         chunk_size = 500
         updated_mp = 0
 
         # Valid multiplayer IGDB game mode IDs: 2 (Multiplayer), 3 (Co-op), 4 (Split screen), 5 (MMO), 6 (Battle Royale)
         multiplayer_mode_ids = {2, 3, 4, 5, 6}
 
-        async with aiohttp.ClientSession() as session:
-            for i in range(0, total_to_fix, chunk_size):
-                chunk = unclassified_ids[i:i + chunk_size]
-                ids_str = ",".join(str(gid) for gid in chunk)
-                body = f"fields id, game_modes; where id = ({ids_str}); limit {chunk_size};"
+        for i in range(0, total_to_fix, chunk_size):
+            chunk = unclassified_ids[i:i + chunk_size]
+            ids_str = ",".join(str(gid) for gid in chunk)
+            body = f"fields id, game_modes; where id = ({ids_str}); limit {chunk_size};"
 
-                try:
-                    async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
-                        if resp.status == 200:
-                            results = await resp.json()
-                            updates = []
+            try:
+                async with igdb.post("https://api.igdb.com/v4/games", data=body) as resp:
+                    if resp.status == 200:
+                        results = await resp.json()
+                        updates = []
 
-                            for game in results:
-                                gid = game["id"]
-                                raw_modes = game.get("game_modes") or []
+                        for game in results:
+                            gid = game["id"]
+                            raw_modes = game.get("game_modes") or []
 
-                                # Safely extract mode IDs whether IGDB returns ints or dicts
-                                mode_ids = set()
-                                for m in raw_modes:
-                                    if isinstance(m, dict):
-                                        mode_ids.add(m.get("id"))
-                                    elif isinstance(m, int):
-                                        mode_ids.add(m)
+                            # Safely extract mode IDs whether IGDB returns ints or dicts
+                            mode_ids = set()
+                            for m in raw_modes:
+                                if isinstance(m, dict):
+                                    mode_ids.add(m.get("id"))
+                                elif isinstance(m, int):
+                                    mode_ids.add(m)
 
-                                # Check if any multiplayer mode ID exists in the game's modes
-                                if mode_ids.intersection(multiplayer_mode_ids):
-                                    updated_mp += 1
-                                    updates.append((1, gid))
+                            # Check if any multiplayer mode ID exists in the game's modes
+                            if mode_ids.intersection(multiplayer_mode_ids):
+                                updated_mp += 1
+                                updates.append((1, gid))
 
-                            if updates:
-                                async with aiosqlite.connect(DB_PATH) as db:
-                                    await db.executemany(
-                                        "UPDATE igdb_games SET is_multiplayer = ? WHERE id = ?",
-                                        updates
-                                    )
-                                    await db.commit()
+                        if updates:
+                            async with aiosqlite.connect(DB_PATH) as db:
+                                await db.executemany(
+                                    "UPDATE igdb_games SET is_multiplayer = ? WHERE id = ?",
+                                    updates
+                                )
+                                await db.commit()
 
-                        elif resp.status == 429:
-                            print("[Auto-Migration] Rate limited. Waiting 2s...")
-                            await asyncio.sleep(2.0)
-                            continue
-                        else:
-                            print(f"[Auto-Migration] API error {resp.status}: {await resp.text()}")
+                    else:
+                        print(f"[Auto-Migration] API error {resp.status}; aborting backfill before cleanup.")
+                        return
 
-                except Exception as e:
-                    print(f"[Auto-Migration] Batch error: {e}")
+            except Exception as e:
+                print(f"[Auto-Migration] Batch error: {e}; skipping cleanup.")
+                return
 
-                if (i // chunk_size) % 10 == 0:
-                    print(f"[Auto-Migration] Progress: {i}/{total_to_fix} games processed ({updated_mp} multiplayer found)...")
+            if (i // chunk_size) % 10 == 0:
+                print(f"[Auto-Migration] Progress: {i}/{total_to_fix} games processed ({updated_mp} multiplayer found)...")
 
-                await asyncio.sleep(0.25)
+            await asyncio.sleep(0.25)
 
-            print(f"[Auto-Migration] Completed backfill! Flagged {updated_mp} games as multiplayer.")
+        print(f"[Auto-Migration] Completed backfill! Flagged {updated_mp} games as multiplayer.")
     else:
         print("[Auto-Migration] All database entries are already classified.")
 
