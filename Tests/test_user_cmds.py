@@ -1,9 +1,10 @@
 import pytest
+import re
 import aiosqlite
 import discord
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from cogs.user_cmds import UserCommands, autocomplete_user_subscriptions, can_user_ping_game
+from cogs.user_cmds import UserCommands, autocomplete_user_subscriptions, can_user_ping_game, split_ping_message
 from database import init_db
 
 # -----------------------------------------------------------------------------
@@ -1141,3 +1142,80 @@ async def test_reset_subscribed_indicator(setup_test_db):
 
     assert row is not None
     assert row[0] == "⭐"
+
+@pytest.mark.parametrize("message", [
+    "short ping <@123>",
+    "x" * 2000,
+    "x" * 2001,
+    "x" * 1995 + "<@123456789012345678>",
+    "long note " + "x" * 10000,
+    " ".join(f"<@{100000000000000000 + i}>" for i in range(1500)),
+    ], ids=[
+    "short",
+    "exact-limit",
+    "overflow",
+    "mention-at-boundary",
+    "long-note",
+    "1500-subscribers",
+])
+def test_split_ping_message_preserves_content_and_mentions(message):
+    batches = split_ping_message(message)
+    prefix = "**LFG ping continued:**\n"
+    assert all(0 < len(batch) <= 2000 for batch in batches)
+    assert all(batch.startswith(prefix) for batch in batches[1:])
+    assert batches[0] + "".join(batch[len(prefix):] for batch in batches[1:]) == message
+    assert re.findall(r"<@!?\d+>", message) == [
+        mention for batch in batches for mention in re.findall(r"<@!?\d+>", batch)
+    ]
+    assert all(len(set(re.findall(r"<@!?(\d+)>", batch))) <= 100 for batch in batches)
+    if len(message) <= 2000:
+        assert batches == [message]
+
+
+@pytest.mark.asyncio
+async def test_ping_game_many_batches_preserves_quiet_mode_and_notifies_once():
+    cog = UserCommands(bot=MagicMock())
+    interaction = make_mock_interaction(user_id=101)
+    ids = list(range(100000000000000000, 100000000000000400))
+    rows = [(uid, i % 2) for i, uid in enumerate(ids)]
+    # Duplicate placeholders exercise repeated subscriber mentions across batches.
+    template = "{caller} {game}: {mentions}\n{mentions}\n{note}"
+    cursor_game = MagicMock()
+    cursor_game.fetchone = AsyncMock(return_value=(1, "Portal 2"))
+    cursor_rows = MagicMock()
+    cursor_rows.fetchall = AsyncMock(return_value=rows)
+    cursor_template = MagicMock()
+    cursor_template.fetchone = AsyncMock(return_value=(template,))
+    contexts = []
+    for cursor in (cursor_game, cursor_rows, cursor_template):
+        context = AsyncMock()
+        context.__aenter__.return_value = cursor
+        contexts.append(context)
+    db = MagicMock()
+    db.execute.side_effect = contexts
+    connection = AsyncMock()
+    connection.__aenter__.return_value = db
+    with patch("cogs.user_cmds.aiosqlite.connect", return_value=connection), \
+            patch("cogs.user_cmds.is_lfg_allowed_in_channel", new=AsyncMock(return_value=True)), \
+            patch("cogs.user_cmds.can_user_ping_game", new=AsyncMock(return_value=(True, []))), \
+            patch("cogs.user_cmds.resolve_to_base_game", new=AsyncMock(return_value=(1, "Portal 2"))), \
+            patch("cogs.user_cmds.claim_game_ping_cooldown", new=AsyncMock(return_value=(True, 0))):
+        await cog.ping_game.callback(cog, interaction, game="Portal 2", note="Let's play!")
+    calls = interaction.followup.send.call_args_list
+    assert len(calls) > 2
+    notified = []
+    for i, call in enumerate(calls):
+        message = call.args[0]
+        assert len(message) <= 2000
+        if i:
+            assert message.startswith("**LFG ping continued:**\n")
+        allowed = call.kwargs["allowed_mentions"]
+        assert allowed.roles is False and allowed.everyone is False
+        batch_ids = [user.id for user in (allowed.users or [])]
+        assert len(batch_ids) <= 100
+        assert all(f"<@{uid}>" in message for uid in batch_ids)
+        notified.extend(batch_ids)
+    assert sorted(notified) == ids[::2]
+    text = "".join(call.args[0] for call in calls)
+    assert all(f"<@{uid}>" in text for uid in ids)
+    assert "Let's play!" in text

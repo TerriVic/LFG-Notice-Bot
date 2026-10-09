@@ -13,6 +13,7 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 * **Live Top Games Leaderboard:** Post dynamic, self-updating embed trackers displaying the server's most popular games.
 * **Custom Ping Templates:** Customize individual ping formatting and templates to suit your style.
 * **Guided Server Setup:** `/config setup_bot` walks moderators through channels, ping roles, cooldown and an optional Quickstart guide, with a review before saving.
+* **Large LFG Pings:** Long pings automatically continue in messages labeled **LFG ping continued**, keeping subscriber mentions intact and quiet-mode users silent. Small pings retain their usual format.
 * **Server Anti-Spam Controls:** Per-game ping cooldowns and optional allowed-ping roles help servers prevent repeated LFG notification spam.
 * **Privacy & Data Ownership:** Native `/delete_all_my_data`, `/delete_my_subscriptions`, and `/unsubscribe` commands give users total control over their stored preferences.
 * **Docker Ready:** Multi-stage Docker deployment setup with SQLite database persistence.
