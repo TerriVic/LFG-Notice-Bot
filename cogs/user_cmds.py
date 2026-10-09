@@ -1057,7 +1057,7 @@ class UserCommands(commands.Cog):
         )
         embed.add_field(
             name="Delete your data",
-            value="Use `/unsubscribe`, `/delete_my_subscriptions` or `/delete_all_my_data`.",
+            value=f"Use {fmt(self.bot, 'unsubscribe')}, {fmt(self.bot, 'delete_my_subscriptions')} or {fmt(self.bot, 'delete_all_my_data')}.",
             inline=False,
         )
         embed.add_field(
