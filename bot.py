@@ -1,6 +1,6 @@
 import os
 import asyncio
-import traceback
+import logging
 
 from dotenv import load_dotenv
 
@@ -10,7 +10,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from database import init_db, auto_migrate_multiplayer_flags
+from database import init_db, auto_migrate_multiplayer_flags, delete_guild_data
+from operations import handle_app_command_error, handle_prefix_command_error
 from utils import get_bot_owner_id
 from igdb_client import igdb
 from contextlib import suppress
@@ -83,60 +84,24 @@ async def on_app_command_error(
         interaction: discord.Interaction,
         error: app_commands.AppCommandError
 ):
-    # Handle cooldowns first and return early
-    if isinstance(error, app_commands.CommandOnCooldown):
-        seconds = round(error.retry_after)
-        msg = (
-            f"⏳ Easy there! You can use this command again in "
-            f"**{seconds} seconds**."
-        )
+    await handle_app_command_error(interaction, error)
 
-        if interaction.response.is_done():
-            await interaction.followup.send(msg, ephemeral=True)
-        else:
-            await interaction.response.send_message(msg, ephemeral=True)
 
+@client.event
+async def on_command_error(ctx, error):
+    await handle_prefix_command_error(ctx, error)
+
+
+@client.event
+async def on_guild_remove(guild):
+    # An unavailable guild is a transient outage, not a removal.
+    if guild.unavailable:
         return
-
-    # Handle permission/check failures
-    if isinstance(error, app_commands.CheckFailure):
-        msg = "⛔ You do not have permission to run this administrative command."
-
-        if interaction.response.is_done():
-            await interaction.followup.send(msg, ephemeral=True)
-        else:
-            await interaction.response.send_message(msg, ephemeral=True)
-
-        return
-
-    original_error = getattr(error, "original", error)
-
-    print(
-        f"[App Command Error] "
-        f"{type(original_error).__name__}: {original_error}"
-    )
-
-    traceback.print_exception(
-        type(original_error),
-        original_error,
-        original_error.__traceback__
-    )
-
-    msg = (
-        "❌ An unexpected error occurred while running this command. "
-        "The error has been logged."
-    )
-
     try:
-        if interaction.response.is_done():
-            await interaction.followup.send(msg, ephemeral=True)
-        else:
-            await interaction.response.send_message(msg, ephemeral=True)
-    except discord.HTTPException as response_error:
-        print(
-            f"[App Command Error] Failed to send error response: "
-            f"{response_error}"
-        )
+        await delete_guild_data(guild.id)
+    except Exception:
+        logging.getLogger("lfg.operations").exception("Failed to clean up removed guild %s", guild.id)
+
 
 @client.event
 async def on_ready():
@@ -150,4 +115,5 @@ async def on_ready():
     except Exception as e:
         print(f"[Help] Failed to fetch command IDs: {e}")
 
-client.run(TOKEN)
+if __name__ == "__main__":
+    client.run(TOKEN)

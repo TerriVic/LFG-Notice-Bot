@@ -1173,9 +1173,15 @@ def test_split_ping_message_preserves_content_and_mentions(message):
 
 
 @pytest.mark.asyncio
-async def test_ping_game_many_batches_preserves_quiet_mode_and_notifies_once():
+@pytest.mark.parametrize("partial_failure", [False, True], ids=["complete", "partial-failure"])
+async def test_ping_game_many_batches_preserves_quiet_mode_and_notifies_once(monkeypatch, partial_failure):
+    from operations import OperationalStats
+    counters = OperationalStats()
+    monkeypatch.setattr("cogs.user_cmds.stats", counters)
     cog = UserCommands(bot=MagicMock())
     interaction = make_mock_interaction(user_id=101)
+    if partial_failure:
+        interaction.followup.send.side_effect = [None, RuntimeError("send failed")]
     ids = list(range(100000000000000000, 100000000000000400))
     rows = [(uid, i % 2) for i, uid in enumerate(ids)]
     # Duplicate placeholders exercise repeated subscriber mentions across batches.
@@ -1200,7 +1206,13 @@ async def test_ping_game_many_batches_preserves_quiet_mode_and_notifies_once():
             patch("cogs.user_cmds.can_user_ping_game", new=AsyncMock(return_value=(True, []))), \
             patch("cogs.user_cmds.resolve_to_base_game", new=AsyncMock(return_value=(1, "Portal 2"))), \
             patch("cogs.user_cmds.claim_game_ping_cooldown", new=AsyncMock(return_value=(True, 0))):
+        if partial_failure:
+            with pytest.raises(RuntimeError, match="send failed"):
+                await cog.ping_game.callback(cog, interaction, game="Portal 2", note="Let's play!")
+            assert counters.counters["pings_sent"] == 0
+            return
         await cog.ping_game.callback(cog, interaction, game="Portal 2", note="Let's play!")
+    assert counters.counters["pings_sent"] == 1
     calls = interaction.followup.send.call_args_list
     assert len(calls) > 2
     notified = []

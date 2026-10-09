@@ -42,6 +42,7 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 | `/delete_my_subscriptions`              | Purge all your active game subscriptions.                                                         |
 | `/delete_all_my_data`                   | Purge all your active game subscriptions and user settings/ping templates.                        |
 | `/quickstart`                           | View the quickstart guide.                                                                        |
+| `/privacy` | View data practices, deletion commands, full policy link (when configured), and contact. |
 | `/help`                                 | View the command guide.                                                                           |
 
 ### Bot Config Commands (`/config`)
@@ -101,8 +102,9 @@ Unconfigured servers block `/ping_game` until a moderator enables channels throu
 #### Prefix Commands
 | Command                                             | Description                                                                                                                                        |
 |-----------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
+| `/owner stats` | Owner-only uptime, current guild count, completed LFG pings, IGDB requests/final failures and unexpected command errors. |
 | `!sync [guild_id]`                                  | Manually sync slash command trees with Discord API. Omit `guild_id` for global sync or pass a guild ID for instant test server syncing.            |
-| `!getdb`                                            | Sends a copy of the active SQLite database (db.sqlite) directly to the bot owner via DM (or channel fallback) for local debugging.                 |
+| `!getdb`                                            | Sends a copy of the active SQLite database (db.sqlite) directly to the bot owner via DM only; if DMs are blocked, no database is posted in the channel for local debugging.                 |
 | `!reload <cog_name>`                                | Hot-reload a specific cog/extension without restarting the bot (e.g., !reload owner_cmds or !reload cogs.owner_cmds). Restricted to the bot owner. |
 | `!delmsg <message_id> [channel_id]` / `!delete_msg` | Delete a specific message sent by the bot (in the current channel or in a specified target channel by ID). Restricted to the bot owner.            |
 ---
@@ -120,11 +122,13 @@ cp .env.example .env
 | `TWITCH_CLIENT_ID` | Client ID from the [Twitch Developer Console](https://dev.twitch.tv/console?utm_source=gemini) for IGDB API access.   |
 | `TWITCH_SECRET`    | Client secret for the same Twitch application as `TWITCH_CLIENT_ID`. Used to obtain app access tokens automatically.  |
 | `BOT_OWNER_ID`     | *(Optional)* Discord User ID of the bot owner for elevated administrative access.                                     |
+| `PRIVACY_POLICY_URL` | Optional public HTTP(S) URL of the full privacy policy, shown by `/privacy`. |
+| `PRIVACY_CONTACT` | Optional privacy contact; defaults to `badhuntilian@gmail.com`. |
 | `DATA_DIR`         | Directory path where SQLite database file will be stored (defaults to the current directory; Docker may set `/data`). |
 
 ### IGDB Authentication & Request Handling
 
-Keep `TWITCH_SECRET` private and configure it alongside `TWITCH_CLIENT_ID`. The bot obtains Twitch app access tokens automatically, renews them before their reported expiry, and replaces them after an authentication failure (HTTP 401). Tokens are held in memory. `TWITCH_ACCESS_TOKEN` is no longer read; existing deployments should replace it with `TWITCH_CLIENT_SECRET` and restart the bot. Update `.env.example` and any deployment environment configuration to use the new variable name too.
+Keep `TWITCH_SECRET` private and configure it alongside `TWITCH_CLIENT_ID`. The bot obtains Twitch app access tokens automatically, renews them before their reported expiry, and replaces them after an authentication failure (HTTP 401). Tokens are held in memory. `TWITCH_ACCESS_TOKEN` is no longer read; existing deployments should replace it with `TWITCH_SECRET` and restart the bot. Update `.env.example` and any deployment environment configuration to use the new variable name too.
 
 All IGDB calls share one HTTP session, with requests spaced at least 0.27 seconds apart and at most eight concurrent requests. HTTP 429 responses delay subsequent requests according to `Retry-After`; temporary network and server failures use bounded retries. These limits cover one running Python process. Multiple bot instances using the same Twitch application need coordinated limits or separate Twitch applications.
 
@@ -200,3 +204,12 @@ This project was developed with the assistance of Generative AI tools:
 * **[GitHub Copilot](https://github.com/features/copilot)**: Used for Discord application setup
 
 > **Disclaimer:** AI tools were used as assistive pair-programmers. All generated code has been manually reviewed, edited, tested, and validated by human maintainers. The maintainers take full responsibility for the security, quality, and functionality of this codebase.
+## Operational maintenance
+
+Server removal deletes that server's channel settings, allowed ping roles, game cooldown state, guide/tracker registrations and server-specific user preferences in one transaction. Global subscriptions and global user settings remain. Temporary server unavailability does not trigger cleanup; rejoining a removed server requires setup again. Cleanup runs on observed removal events, rather than purging uncached servers at startup.
+
+`/owner stats` is ephemeral and restricted to the configured bot owner. Counters live in memory, contain no per-user/per-server activity history, and reset on process restart. Completed pings count once after all message batches succeed; rejected or partially sent calls do not count. IGDB failures count final non-success responses or exceptions after retries, once per underlying request; cache hits and cancellations do not count as failures. Unexpected errors reaching the shared slash/prefix handlers are logged with a traceback and counted; expected cooldown/check/argument errors and errors handled inside individual commands are excluded. Error replies do not expose tracebacks to users.
+
+Prefix maintenance commands and Message Content intent remain enabled. `!sync` can repair slash registration without relying on a working slash command, and `!reload` supports extension recovery. For future public rollout, mention-based maintenance commands or DMs are an alternative to converting everything to slash commands. Guild Members intent is used for subscription membership filtering and should remain enabled for the current design.
+
+After deploying this patch, run `!sync` (or `!sync <test_guild_id>` for your test server) to register `/privacy` and `/owner stats`. Set `PRIVACY_POLICY_URL` to the published policy's real URL if available.

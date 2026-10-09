@@ -1,4 +1,6 @@
 import os
+import time
+from operations import stats
 
 import discord
 from discord import app_commands
@@ -60,6 +62,23 @@ class OwnerCommands(commands.Cog):
         name="owner",
         description="Bot owner maintenance commands"
     )
+
+    @owner_group.command(name="stats", description="View process uptime and aggregate operational counters")
+    @is_bot_owner()
+    async def operational_stats(self, interaction: discord.Interaction):
+        counters = stats.snapshot()
+        embed = discord.Embed(title="Bot operational statistics", color=discord.Color.blue())
+        embed.add_field(name="Current servers", value=str(len(self.bot.guilds)))
+        embed.add_field(name="Process uptime", value=f"{int(time.monotonic() - stats.started_at)} seconds")
+        for label, key in (
+            ("Completed LFG pings", "pings_sent"),
+            ("IGDB requests (excluding cache hits)", "igdb_requests"),
+            ("IGDB final failures", "igdb_failures"),
+            ("Unexpected command errors", "command_errors"),
+        ):
+            embed.add_field(name=label, value=str(counters.get(key, 0)))
+        embed.set_footer(text="Counters cover this process since startup and reset on restart. Partial LFG sends are not completed pings.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # --- PREFIX COMMANDS ---
     @commands.command(name="reload")
@@ -360,24 +379,26 @@ class OwnerCommands(commands.Cog):
             return
 
         try:
-            # Send as an attachment via DM or to the channel
             db_file = discord.File(DB_PATH, filename="db.sqlite")
-
-            # Sending via Direct Message (recommended to keep channel clean)
-            await ctx.author.send("📁 Here is the current copy of the SQLite database:", file=db_file)
-
-            # Confirm in the channel where command was invoked
-            if ctx.guild:
-                await ctx.send("📬 Check your Direct Messages! Sent the database file.", delete_after=10)
-
+            await ctx.author.send(
+                "📁 Here is the current copy of the SQLite database:",
+                file=db_file,
+            )
         except discord.Forbidden:
-            # Fallback if the user's DMs are closed
-            await ctx.send("⚠️ Couldn't DM you. Sending directly in channel...", delete_after=5)
-            db_file = discord.File(DB_PATH, filename="db.sqlite")
-            await ctx.send(file=db_file)
+            await ctx.send(
+                "⚠️ Couldn't send you a DM. Enable DMs and try again. "
+                "The database is only sent privately.",
+                delete_after=10,
+            )
+            return
 
-        except Exception as e:
-            await ctx.send(f"❌ Failed to send database file:\n```py\n{e}\n```")
+        # Only a status message may be posted in the invoking server channel.
+        # Unexpected failures propagate to the shared prefix error handler.
+        if ctx.guild:
+            await ctx.send(
+                "📬 Check your Direct Messages! Sent the database file.",
+                delete_after=10,
+            )
 
 async def setup(bot):
     await bot.add_cog(OwnerCommands(bot))

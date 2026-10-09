@@ -9,6 +9,7 @@ from datetime import timezone
 from email.utils import parsedate_to_datetime
 
 import aiohttp
+from operations import stats
 
 
 class IGDBError(RuntimeError):
@@ -104,6 +105,19 @@ class IGDBClient:
             self._next_request = time.monotonic() + 0.27
 
     async def _request(self, body):
+        # Count final failures once per underlying request, after bounded retries.
+        # Shared cached searches count once; cache hits do not count as requests.
+        stats.increment("igdb_requests")
+        try:
+            result = await self._request_impl(body)
+        except Exception:
+            stats.increment("igdb_failures")
+            raise
+        if result.status != 200:
+            stats.increment("igdb_failures")
+        return result
+
+    async def _request_impl(self, body):
         refreshed = False
         for attempt in range(4):
             token = await self._get_token()
