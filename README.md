@@ -95,13 +95,21 @@ Copy `.env.example` to `.env` and fill in your API credentials:
 cp .env.example .env
 ```
 
-| Variable              | Description                                                                                                           |
-|-----------------------|-----------------------------------------------------------------------------------------------------------------------|
-| `DISCORD_TOKEN`       | Discord Bot Token from the [Discord Developer Portal](https://discord.com/developers/applications?utm_source=gemini). |
-| `TWITCH_CLIENT_ID`    | Client ID from the [Twitch Developer Console](https://dev.twitch.tv/console?utm_source=gemini) for IGDB API access.   |
-| `TWITCH_ACCESS_TOKEN` | OAuth Access Token generated for IGDB API calls.                                                                      |
-| `BOT_OWNER_ID`        | *(Optional)* Discord User ID of the bot owner for elevated administrative access.                                     |
-| `DATA_DIR`            | Directory path where SQLite database file will be stored (defaults to `./data`).                                      |
+| Variable           | Description                                                                                                           |
+|--------------------|-----------------------------------------------------------------------------------------------------------------------|
+| `DISCORD_TOKEN`    | Discord Bot Token from the [Discord Developer Portal](https://discord.com/developers/applications?utm_source=gemini). |
+| `TWITCH_CLIENT_ID` | Client ID from the [Twitch Developer Console](https://dev.twitch.tv/console?utm_source=gemini) for IGDB API access.   |
+| `TWITCH_SECRET`    | Client secret for the same Twitch application as `TWITCH_CLIENT_ID`. Used to obtain app access tokens automatically.  |
+| `BOT_OWNER_ID`     | *(Optional)* Discord User ID of the bot owner for elevated administrative access.                                     |
+| `DATA_DIR`         | Directory path where SQLite database file will be stored (defaults to the current directory; Docker may set `/data`). |
+
+### IGDB Authentication & Request Handling
+
+Keep `TWITCH_SECRET` private and configure it alongside `TWITCH_CLIENT_ID`. The bot obtains Twitch app access tokens automatically, renews them before their reported expiry, and replaces them after an authentication failure (HTTP 401). Tokens are held in memory. `TWITCH_ACCESS_TOKEN` is no longer read; existing deployments should replace it with `TWITCH_CLIENT_SECRET` and restart the bot. Update `.env.example` and any deployment environment configuration to use the new variable name too.
+
+All IGDB calls share one HTTP session, with requests spaced at least 0.27 seconds apart and at most eight concurrent requests. HTTP 429 responses delay subsequent requests according to `Retry-After`; temporary network and server failures use bounded retries. These limits cover one running Python process. Multiple bot instances using the same Twitch application need coordinated limits or separate Twitch applications.
+
+Successful search results, including empty results, are cached in memory for 60 seconds (up to 256 queries). Simultaneous identical searches share one request; at most 64 distinct searches may be pending. Autocomplete gives the live search two seconds before falling back to local results. The shared request may finish in the background and populate the cache for the next lookup.
 
 ---
 
@@ -111,7 +119,7 @@ cp .env.example .env
 
 1. **Clone the Repository:**
 ```bash
-git clone [https://github.com/your-username/LFG-Notice-Bot.git](https://github.com/your-username/LFG-Notice-Bot.git)
+git clone https://github.com/Vic/LFG-Notice-Bot.git
 cd LFG-Notice-Bot
 ```
 
@@ -146,6 +154,16 @@ python bot.py
 ```
 
 ---
+
+## Running Tests
+
+Install `pytest` and `pytest-asyncio` if they are not already installed, then run from the project root:
+
+```bash
+python -m pytest Tests --asyncio-mode=auto -q
+```
+
+The IGDB client tests mock HTTP responses and do not require real Twitch credentials. Tests for game lookups, database repair, and catalog sync mock the shared `igdb.post` transport.
 
 ## License & Privacy
 

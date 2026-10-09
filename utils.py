@@ -4,7 +4,7 @@ import re
 import time
 from typing import Callable, Awaitable, Optional
 
-import aiohttp
+from igdb_client import igdb
 import aiosqlite
 import discord
 from discord import app_commands
@@ -26,7 +26,6 @@ GENERIC_DLC_PATTERN = re.compile(
 
 NOISE_KEYWORDS = ["demake", "nokia", "flash", "collection", "bundle", "prototype", "edition"]
 
-
 def normalize_game_name(name: str) -> str:
     """Strips edition suffixes, standardizes mobile quotes, and removes trailing punctuation."""
     clean_name = name.replace("’", "'").replace("‘", "'")
@@ -41,17 +40,9 @@ def extract_id(val):
     return val
 
 async def fetch_game_details_from_igdb(game_name: str) -> dict | None:
-    client_id = os.getenv("TWITCH_CLIENT_ID")
-    access_token = os.getenv("TWITCH_ACCESS_TOKEN")
 
-    if not client_id or not access_token:
+    if not igdb.configured:
         return None
-
-    headers = {
-        "Client-ID": client_id,
-        "Authorization": f"Bearer {access_token}",
-        "Accept": "application/json"
-    }
 
     # Escape double quotes to prevent API crashes on games like Marvel's Spider-Man
     clean_search = normalize_game_name(game_name).replace('"', '\\"')
@@ -63,33 +54,24 @@ async def fetch_game_details_from_igdb(game_name: str) -> dict | None:
         f'limit 1;'
     )
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
-            if resp.status != 200:
-                return None
-            data = await resp.json()
-            return data[0] if data else None
+    async with igdb.post("https://api.igdb.com/v4/games", data=body) as resp:
+        if resp.status != 200:
+            return None
+        data = await resp.json()
+        return data[0] if data else None
 
 async def fetch_and_cache_game_from_igdb(game_name: str) -> tuple[int, str] | None:
-    client_id = os.getenv("TWITCH_CLIENT_ID")
-    access_token = os.getenv("TWITCH_ACCESS_TOKEN")
 
-    if not client_id or not access_token:
+    if not igdb.configured:
         return None
-
-    headers = {
-        "Client-ID": client_id,
-        "Authorization": f"Bearer {access_token}"
-    }
 
     clean_search = normalize_game_name(game_name)
     body = f'fields id, name, category, version_parent, parent_game; search "{clean_search}"; limit 10;'
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
-            if resp.status != 200:
-                return None
-            data = await resp.json()
+    async with igdb.post("https://api.igdb.com/v4/games", data=body) as resp:
+        if resp.status != 200:
+            return None
+        data = await resp.json()
 
     if not data:
         return None
@@ -138,53 +120,45 @@ async def resolve_to_base_game(game_id: int, game_name: str):
     Only resolve to parent game if the item is explicitly a DLC or expansion.
     Preserves parent game in igdb_games cache.
     """
-    client_id = os.getenv("TWITCH_CLIENT_ID")
-    access_token = os.getenv("TWITCH_ACCESS_TOKEN")
 
-    if not client_id or not access_token:
+    if not igdb.configured:
         return game_id, game_name
-
-    headers = {
-        "Client-ID": client_id,
-        "Authorization": f"Bearer {access_token}"
-    }
 
     body = f'fields name, category, parent_game, version_parent; where id = {game_id};'
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data:
-                        item = data[0]
-                        category = item.get("category", 0)
+        async with igdb.post("https://api.igdb.com/v4/games", data=body) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data:
+                    item = data[0]
+                    category = item.get("category", 0)
 
-                        if category in {1, 2}:
-                            parent = item.get("parent_game")
-                            if parent:
-                                p_id = parent.get("id") if isinstance(parent, dict) else parent
-                                p_body = f'fields id, name, category; where id = {p_id};'
-                                async with session.post("https://api.igdb.com/v4/games", headers=headers, data=p_body) as p_resp:
-                                    if p_resp.status == 200:
-                                        p_data = await p_resp.json()
-                                        if p_data:
-                                            p_item = p_data[0]
-                                            p_official_name = p_item["name"]
+                    if category in {1, 2}:
+                        parent = item.get("parent_game")
+                        if parent:
+                            p_id = parent.get("id") if isinstance(parent, dict) else parent
+                            p_body = f'fields id, name, category; where id = {p_id};'
+                            async with igdb.post("https://api.igdb.com/v4/games", data=p_body) as p_resp:
+                                if p_resp.status == 200:
+                                    p_data = await p_resp.json()
+                                    if p_data:
+                                        p_item = p_data[0]
+                                        p_official_name = p_item["name"]
 
-                                            # Cache base game into local DB
-                                            async with aiosqlite.connect(DB_PATH) as db:
-                                                await db.execute(
-                                                    """INSERT OR IGNORE INTO igdb_games
-                                                           (id, name, updated_at, category)
-                                                       VALUES (?, ?, ?, ?)""",
-                                                    (p_item["id"], p_official_name, int(time.time()), p_item.get("category", 0))
-                                                )
-                                                await db.commit()
+                                        # Cache base game into local DB
+                                        async with aiosqlite.connect(DB_PATH) as db:
+                                            await db.execute(
+                                                """INSERT OR IGNORE INTO igdb_games
+                                                       (id, name, updated_at, category)
+                                                   VALUES (?, ?, ?, ?)""",
+                                                (p_item["id"], p_official_name, int(time.time()), p_item.get("category", 0))
+                                            )
+                                            await db.commit()
 
-                                            return p_item["id"], p_official_name
+                                        return p_item["id"], p_official_name
 
-                        return game_id, item.get("name", game_name)
+                    return game_id, item.get("name", game_name)
     except Exception as e:
         print(f"Error in resolve_to_base_game: {e}")
 
@@ -503,53 +477,47 @@ async def autocomplete_games(interaction: discord.Interaction, current: str):
 
         # 3. LIVE IGDB SEARCH
         if len(search_term) >= 2:
-            client_id = os.getenv("TWITCH_CLIENT_ID")
-            access_token = os.getenv("TWITCH_ACCESS_TOKEN")
 
-            if client_id and access_token:
-                headers = {"Client-ID": client_id, "Authorization": f"Bearer {access_token}"}
+            if igdb.configured:
                 body = f'fields name, total_rating_count, game_modes, category, parent_game, version_parent; search "{igdb_search_query}"; limit 35;'
 
                 try:
-                    timeout = aiohttp.ClientTimeout(total=2.5)
-                    async with aiohttp.ClientSession(timeout=timeout) as session:
-                        async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
-                            if resp.status == 200:
-                                igdb_results = await resp.json()
-                                for item in igdb_results:
-                                    g_name = item.get("name", "")
-                                    r_cnt = item.get("total_rating_count", 0)
-                                    cat = item.get("category", 0)
-                                    modes = item.get("game_modes", [])
+                    async with igdb.post("https://api.igdb.com/v4/games", data=body, timeout=2.0) as resp:
+                        if resp.status == 200:
+                            igdb_results = await resp.json()
+                            for item in igdb_results:
+                                g_name = item.get("name", "")
+                                r_cnt = item.get("total_rating_count", 0)
+                                cat = item.get("category", 0)
+                                modes = item.get("game_modes", [])
 
-
-                                    # Only filter out non-main categories if user isn't searching for DLCs
-                                    # We allow parent_game / version_parent for standalone indie games
-                                    if not user_searching_dlc:
-                                        if cat is not None and cat not in {0, 8, 9, 10, 11}:
-                                            continue
-
-                                    raw_mode_ids = set()
-                                    for m in modes or []:
-                                        if isinstance(m, dict):
-                                            raw_mode_ids.add(m.get("id"))
-                                        elif isinstance(m, int):
-                                            raw_mode_ids.add(m)
-
-                                    is_mp = 1 if raw_mode_ids.intersection({2, 3, 4, 5, 6}) else 0
-
-                                    if g_name.lower() in seen_names:
+                                # Only filter out non-main categories if user isn't searching for DLCs
+                                # We allow parent_game / version_parent for standalone indie games
+                                if not user_searching_dlc:
+                                    if cat is not None and cat not in {0, 8, 9, 10, 11}:
                                         continue
 
-                                    # Check user's subscription status for live IGDB games
-                                    is_sub = 1 if g_name.lower() in user_subscribed_names else 0
+                                raw_mode_ids = set()
+                                for m in modes or []:
+                                    if isinstance(m, dict):
+                                        raw_mode_ids.add(m.get("id"))
+                                    elif isinstance(m, int):
+                                        raw_mode_ids.add(m)
 
-                                    match_tier, similarity = compute_match_score(g_name, search_term)
-                                    if should_keep_candidate(g_name, r_cnt, match_tier, similarity, inner_is_sub=bool(is_sub)):
-                                        sort_score = get_sort_score(match_tier, is_mp, is_sub)
-                                        sub_cnt = server_sub_counts.get(g_name.lower(), 0)
-                                        choice_candidates.append((sort_score, -similarity, -sub_cnt, -(r_cnt or 0), g_name, is_mp, is_sub))
-                                        seen_names.add(g_name.lower())
+                                is_mp = 1 if raw_mode_ids.intersection({2, 3, 4, 5, 6}) else 0
+
+                                if g_name.lower() in seen_names:
+                                    continue
+
+                                # Check user's subscription status for live IGDB games
+                                is_sub = 1 if g_name.lower() in user_subscribed_names else 0
+
+                                match_tier, similarity = compute_match_score(g_name, search_term)
+                                if should_keep_candidate(g_name, r_cnt, match_tier, similarity, inner_is_sub=bool(is_sub)):
+                                    sort_score = get_sort_score(match_tier, is_mp, is_sub)
+                                    sub_cnt = server_sub_counts.get(g_name.lower(), 0)
+                                    choice_candidates.append((sort_score, -similarity, -sub_cnt, -(r_cnt or 0), g_name, is_mp, is_sub))
+                                    seen_names.add(g_name.lower())
                 except Exception as e:
                     print(f"IGDB Autocomplete Exception: {e}")
                     pass
@@ -602,7 +570,6 @@ async def autocomplete_set_lfg_channels(interaction: discord.Interaction, curren
             choices.append(app_commands.Choice(name=label[:100], value=str(channel.id)))
 
     return choices[:25]
-
 
 async def autocomplete_whitelisted_channels_only(interaction: discord.Interaction, current: str):
     if not interaction.guild:

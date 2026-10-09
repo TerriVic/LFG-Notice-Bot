@@ -110,7 +110,7 @@ async def test_user_settings_migration(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 @patch("os.getenv")
-@patch("aiohttp.ClientSession.post")
+@patch("database.igdb.post")
 async def test_auto_migrate_multiplayer_flags_and_cleanup(mock_post, mock_getenv, tmp_path, monkeypatch):
     """Test IGDB multiplayer flag updating and pruning of single-player games."""
     test_db_path = tmp_path / "test_cleanup.sqlite"
@@ -119,7 +119,7 @@ async def test_auto_migrate_multiplayer_flags_and_cleanup(mock_post, mock_getenv
     # 1. Setup mock IGDB API credentials
     mock_getenv.side_effect = lambda key, default=None: {
         "TWITCH_CLIENT_ID": "fake_client_id",
-        "TWITCH_ACCESS_TOKEN": "fake_token",
+        "TWITCH_SECRET": "fake_token",
     }.get(key, default)
 
     # 2. Seed test database with unclassified games and subscription
@@ -166,7 +166,7 @@ async def test_auto_migrate_multiplayer_flags_and_cleanup(mock_post, mock_getenv
 
 @pytest.mark.asyncio
 @patch("os.getenv")
-@patch("aiohttp.ClientSession.post")
+@patch("database.igdb.post")
 async def test_init_db_repairs_orphan_subscriptions(mock_post, mock_getenv, tmp_path, monkeypatch):
     """Test that init_db detects orphan subscriptions and fetches missing game data from IGDB."""
     test_db_path = tmp_path / "test_orphan_repair.sqlite"
@@ -175,7 +175,7 @@ async def test_init_db_repairs_orphan_subscriptions(mock_post, mock_getenv, tmp_
     # Mock IGDB API credentials
     mock_getenv.side_effect = lambda key, default=None: {
         "TWITCH_CLIENT_ID": "fake_client_id",
-        "TWITCH_ACCESS_TOKEN": "fake_token",
+        "TWITCH_SECRET": "fake_token",
     }.get(key, default)
 
     # Pre-populate database with tables and an orphan subscription (game_id 999 has no entry in igdb_games)
@@ -472,3 +472,27 @@ async def test_get_guild_ping_role_ids(tmp_path, monkeypatch):
         await db.commit()
 
     assert await get_guild_ping_role_ids(999) == [10, 30]
+
+
+@pytest.mark.asyncio
+@patch("database.igdb.post")
+async def test_backfill_failure_preserves_games_before_cleanup(mock_post, tmp_path, monkeypatch):
+    """An exhausted API request must not purge unclassified cached games."""
+    from igdb_client import IGDBError
+    path = str(tmp_path / "failed_backfill.sqlite")
+    monkeypatch.setattr("database.DB_PATH", path)
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "test_id")
+    monkeypatch.setenv("TWITCH_SECRET", "test_secret")
+    await init_db()
+    async with aiosqlite.connect(path) as db:
+        await db.execute(
+            "INSERT INTO igdb_games (id, name, updated_at) VALUES (?, ?, ?)",
+            (101, "Unclassified Game", 1),
+        )
+        await db.commit()
+    mock_post.side_effect = IGDBError("IGDB unavailable after bounded retries")
+    await auto_migrate_multiplayer_flags()
+    mock_post.assert_called_once()
+    async with aiosqlite.connect(path) as db:
+        async with db.execute("SELECT id FROM igdb_games") as cursor:
+            assert await cursor.fetchall() == [(101,)]
