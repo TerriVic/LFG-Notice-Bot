@@ -1,5 +1,6 @@
 import datetime
 import os
+import re
 import time
 
 import aiosqlite
@@ -92,6 +93,38 @@ async def can_user_ping_game(interaction: discord.Interaction) -> tuple[bool, li
 
     member_role_ids = {role.id for role in getattr(interaction.user, "roles", [])}
     return bool(member_role_ids.intersection(valid_role_ids)), valid_role_ids
+
+
+def split_ping_message(message: str) -> list[str]:
+    """Keep mentions intact and reserve space for continuation labels.
+
+    Also cap distinct user mentions per batch at 100, so each batch can
+    use Discord's explicit allowed-users list safely.
+    """
+    continuation = "**LFG ping continued:**\n"
+    messages = []
+    prefix = ""
+    parts = []
+    length = 0
+    user_ids = set()
+    for match in re.finditer(r"<@!?(\d+)>|[\s\S]", message):
+        token = match.group(0)
+        user_id = int(match.group(1)) if match.group(1) else None
+        if (len(prefix) + length + len(token) > 2000
+                or (user_id is not None and user_id not in user_ids
+                    and len(user_ids) >= 100)):
+            messages.append(prefix + "".join(parts))
+            prefix = continuation
+            parts = []
+            length = 0
+            user_ids = set()
+        parts.append(token)
+        length += len(token)
+        if user_id is not None:
+            user_ids.add(user_id)
+    if parts:
+        messages.append(prefix + "".join(parts))
+    return messages
 
 
 class UserCommands(commands.Cog):
@@ -501,23 +534,27 @@ class UserCommands(commands.Cog):
                 f"{verb} quiet mode turned on"
             )
 
-        # 10. Allow Discord notifications only for non-quiet subscribers
-        allowed_users = [
-            discord.Object(id=uid)
-            for uid in active_user_ids
-        ]
-
-        allowed_mentions = discord.AllowedMentions(
-            users=allowed_users if allowed_users else False,
-            roles=False,
-            everyone=False
-        )
-
-        # Successful /ping_game -> public message
-        await interaction.followup.send(
-            msg,
-            allowed_mentions=allowed_mentions
-        )
+        # 10. Send bounded public batches. Only active subscribers in the
+        # current batch may be notified, and repeated template/quiet-summary
+        # mentions must not notify the same subscriber again.
+        active_ids = set(active_user_ids)
+        notified_ids = set()
+        for message in split_ping_message(msg):
+            mentioned_ids = {
+                int(uid) for uid in re.findall(r"<@!?(\d+)>", message)
+            }
+            batch_ids = (mentioned_ids & active_ids) - notified_ids
+            allowed_mentions = discord.AllowedMentions(
+                users=[discord.Object(id=uid) for uid in sorted(batch_ids)]
+                if batch_ids else False,
+                roles=False,
+                everyone=False
+            )
+            await interaction.followup.send(
+                message,
+                allowed_mentions=allowed_mentions
+            )
+            notified_ids.update(batch_ids)
 
     @app_commands.command(name="set_ping_template", description="Customize how your /ping_game calls look")
     @app_commands.describe(template="Your custom message. Placeholders: {caller}, {game}, {mentions}, {note}")
