@@ -29,7 +29,7 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 | `/unsubscribe <game>`                   | Unsubscribe from active notifications for a game.                                                 |
 | `/user_subscriptions [user] [public]`   | View active game subscriptions for yourself or another member.                                    |
 | `/game_info <game> [public]`            | Get details, genres, and cover image for a game.                                                  |
-| `/ping_game <game> [note]`              | Send an LFG ping mentioning all subscribers of a game, with an optional note.                       |
+| `/ping_game <game> [note]`              | Send an LFG ping mentioning all subscribers of a game, with an optional note.                     |
 | `/quiet_mode [enabled] [scope]`         | Mute/unmute LFG notifications globally or specifically for the current server.                    |
 | `/show_subscribers <game>`              | View subscribers for a game without triggering a ping.                                            |
 | `/top_games [limit] [public]`           | View the most subscribed games on the server.                                                     |
@@ -42,13 +42,13 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 | `/delete_my_subscriptions`              | Purge all your active game subscriptions.                                                         |
 | `/delete_all_my_data`                   | Purge all your active game subscriptions and user settings/ping templates.                        |
 | `/quickstart`                           | View the quickstart guide.                                                                        |
-| `/privacy` | View data practices, deletion commands, full policy link (when configured), and contact. |
+| `/privacy`                              | View data practices, deletion commands, full policy link (when configured), and contact.          |
 | `/help`                                 | View the command guide.                                                                           |
 
 ### Bot Config Commands (`/config`)
 | Command                                               | Description                                                                                                                                                        |
 |-------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `/config setup_bot` | Start the private server setup wizard (requires Manage Messages permission or bot-owner access). |
+| `/config setup_bot`                                   | Start the private server setup wizard (requires Manage Messages permission or bot-owner access).                                                                   |
 | `/config setup_top_games [limit] [interval]`          | Post a live-updating top games leaderboard message in the current channel. `interval` accepts decimal hours (e.g., `0.25` for 15m, `0.5` for 30m, default: `1.0`). |
 | `/config edit_top_games <message> [limit] [interval]` | Update display limit or interval settings (e.g., `0.5` for 30m), or leave options empty to force an immediate refresh.                                             |
 | `/config force_update_top_games <message>`            | Force an immediate refresh on an active live tracker message.                                                                                                      |
@@ -100,13 +100,13 @@ Unconfigured servers block `/ping_game` until a moderator enables channels throu
 | `/owner delete_all_user_data <user>`      | Permanently purge all stored data for a specific user (triggers an interactive confirmation prompt).              |
 
 #### Prefix Commands
-| Command                                             | Description                                                                                                                                        |
-|-----------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
-| `/owner stats` | Owner-only uptime, current guild count, completed LFG pings, IGDB requests/final failures and unexpected command errors. |
-| `!sync [guild_id]`                                  | Manually sync slash command trees with Discord API. Omit `guild_id` for global sync or pass a guild ID for instant test server syncing.            |
-| `!getdb`                                            | Sends a copy of the active SQLite database (db.sqlite) directly to the bot owner via DM only; if DMs are blocked, no database is posted in the channel for local debugging.                 |
-| `!reload <cog_name>`                                | Hot-reload a specific cog/extension without restarting the bot (e.g., !reload owner_cmds or !reload cogs.owner_cmds). Restricted to the bot owner. |
-| `!delmsg <message_id> [channel_id]` / `!delete_msg` | Delete a specific message sent by the bot (in the current channel or in a specified target channel by ID). Restricted to the bot owner.            |
+| Command                                             | Description                                                                                                                                                                 |
+|-----------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `/owner stats`                                      | Owner-only uptime, current guild count, completed LFG pings, IGDB requests/final failures and unexpected command errors.                                                    |
+| `!sync [guild_id]`                                  | Manually sync slash command trees with Discord API. Omit `guild_id` for global sync or pass a guild ID for instant test server syncing.                                     |
+| `!getdb`                                            | Sends a copy of the active SQLite database (db.sqlite) directly to the bot owner via DM only; if DMs are blocked, no database is posted in the channel for local debugging. |
+| `!reload <cog_name>`                                | Hot-reload a specific cog/extension without restarting the bot (e.g., !reload owner_cmds or !reload cogs.owner_cmds). Restricted to the bot owner.                          |
+| `!delmsg <message_id> [channel_id]` / `!delete_msg` | Delete a specific message sent by the bot (in the current channel or in a specified target channel by ID). Restricted to the bot owner.                                     |
 ---
 ## Configuration & Environment Variables
 
@@ -116,15 +116,15 @@ Copy `.env.example` to `.env` and fill in your API credentials:
 cp .env.example .env
 ```
 
-| Variable           | Description                                                                                                           |
-|--------------------|-----------------------------------------------------------------------------------------------------------------------|
-| `DISCORD_TOKEN`    | Discord Bot Token from the [Discord Developer Portal](https://discord.com/developers/applications?utm_source=gemini). |
-| `TWITCH_CLIENT_ID` | Client ID from the [Twitch Developer Console](https://dev.twitch.tv/console?utm_source=gemini) for IGDB API access.   |
-| `TWITCH_SECRET`    | Client secret for the same Twitch application as `TWITCH_CLIENT_ID`. Used to obtain app access tokens automatically.  |
-| `BOT_OWNER_ID`     | *(Optional)* Discord User ID of the bot owner for elevated administrative access.                                     |
-| `PRIVACY_POLICY_URL` | Optional public HTTP(S) URL of the full privacy policy, shown by `/privacy`. |
-| `PRIVACY_CONTACT` | Optional privacy contact; defaults to `badhuntilian@gmail.com`. |
-| `DATA_DIR`         | Directory path where SQLite database file will be stored (defaults to the current directory; Docker may set `/data`). |
+| Variable             | Description                                                                                                           |
+|----------------------|-----------------------------------------------------------------------------------------------------------------------|
+| `DISCORD_TOKEN`      | Discord Bot Token from the [Discord Developer Portal](https://discord.com/developers/applications?utm_source=gemini). |
+| `TWITCH_CLIENT_ID`   | Client ID from the [Twitch Developer Console](https://dev.twitch.tv/console?utm_source=gemini) for IGDB API access.   |
+| `TWITCH_SECRET`      | Client secret for the same Twitch application as `TWITCH_CLIENT_ID`. Used to obtain app access tokens automatically.  |
+| `BOT_OWNER_ID`       | *(Optional)* Discord User ID of the bot owner for elevated administrative access.                                     |
+| `PRIVACY_POLICY_URL` | Optional public HTTP(S) URL of the full privacy policy, shown by `/privacy`.                                          |
+| `PRIVACY_CONTACT`    | Optional privacy contact; defaults to `badhuntilian@gmail.com`.                                                       |
+| `DATA_DIR`           | Directory path where SQLite database file will be stored (defaults to the current directory; Docker may set `/data`). |
 
 ### IGDB Authentication & Request Handling
 
