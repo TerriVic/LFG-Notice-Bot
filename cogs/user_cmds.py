@@ -267,7 +267,7 @@ class UserCommands(commands.Cog):
 
         if not allowed:
             await interaction.response.send_message(
-                "❌ LFG pings are not allowed in this channel.",
+                "❌ LFG pings are not enabled in this channel. A moderator can run `/config setup_bot` or `/config set_lfg_channels`.",
                 ephemeral=True
             )
             return
@@ -1058,8 +1058,8 @@ class UserCommands(commands.Cog):
             inline=False
         )
 
-        # Conditionally display admin section if user has Administrator permissions or is bot owner
-        is_admin = interaction.permissions and interaction.permissions.administrator
+        # Show configuration commands to users who can run them.
+        is_admin = interaction.permissions and interaction.permissions.manage_messages
         raw_owner_id = os.getenv("BOT_OWNER_ID")
         is_owner = raw_owner_id and raw_owner_id.isdigit() and interaction.user.id == int(raw_owner_id)
 
@@ -1073,6 +1073,15 @@ class UserCommands(commands.Cog):
                     f"• {fmt(self.bot, 'config', 'force_update_top_games')} `<message>` — Force an immediate refresh on a live tracker.\n"
                     f"• {fmt(self.bot, 'config', 'remove_top_games')} `<message>` — Stop tracking and delete a live top games message.\n"
                     f"• {fmt(self.bot, 'config', 'server_overview')} — View subscription details for members in the server.\n"
+                ),
+                inline=False
+            )
+
+            embed.add_field(
+                name="Server Setup",
+                value=(
+                    f"• {fmt(self.bot, 'config', 'setup_bot')} — Private wizard: allowed channels, ping roles, same-game cooldown and optional Quickstart guide.\n"
+                    "Step 1: select channels to restrict pings, or Continue — allow all channels for no channel restriction. New servers block pings until configured. Review and save to apply; canceling or timing out changes nothing."
                 ),
                 inline=False
             )

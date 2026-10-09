@@ -12,6 +12,7 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 * **IGDB Database Integration:** Autocomplete and search millions of games directly from IGDB, automatically resolving special/deluxe editions to base games.
 * **Live Top Games Leaderboard:** Post dynamic, self-updating embed trackers displaying the server's most popular games.
 * **Custom Ping Templates:** Customize individual ping formatting and templates to suit your style.
+* **Guided Server Setup:** `/config setup_bot` walks moderators through channels, ping roles, cooldown and an optional Quickstart guide, with a review before saving.
 * **Server Anti-Spam Controls:** Per-game ping cooldowns and optional allowed-ping roles help servers prevent repeated LFG notification spam.
 * **Privacy & Data Ownership:** Native `/delete_all_my_data`, `/delete_my_subscriptions`, and `/unsubscribe` commands give users total control over their stored preferences.
 * **Docker Ready:** Multi-stage Docker deployment setup with SQLite database persistence.
@@ -45,6 +46,7 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 ### Bot Config Commands (`/config`)
 | Command                                               | Description                                                                                                                                                        |
 |-------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `/config setup_bot` | Start the private server setup wizard (requires Manage Messages permission or bot-owner access). |
 | `/config setup_top_games [limit] [interval]`          | Post a live-updating top games leaderboard message in the current channel. `interval` accepts decimal hours (e.g., `0.25` for 15m, `0.5` for 30m, default: `1.0`). |
 | `/config edit_top_games <message> [limit] [interval]` | Update display limit or interval settings (e.g., `0.5` for 30m), or leave options empty to force an immediate refresh.                                             |
 | `/config force_update_top_games <message>`            | Force an immediate refresh on an active live tracker message.                                                                                                      |
@@ -60,7 +62,23 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 | `/config update_quickstart [message]`                 | Reload the contents of all quickstart messages, or a specific message (in case of an update)                                                                       |
 
 
+### First-Run Server Setup
+
+Run `/config setup_bot` inside the server with **Manage Messages** permission (or as the bot owner):
+
+1. Select up to 25 text channels to restrict LFG pings to those channels. To apply no channel restriction, leave the selection empty or press **Continue — allow all channels**.
+2. Choose allowed ping roles, or **Everyone**.
+3. Choose a per-game cooldown; **10 minutes** is the recommended wizard option. Use `/config ping_cooldown` afterward for custom values.
+4. Choose a text channel for a new Quickstart guide, or skip it.
+5. Review the settings and click **Save setup**.
+
+Only the moderator who opened the wizard can use it while retaining permission. Canceling or timing out after five minutes of inactivity leaves settings unchanged. Saving replaces the channel access mode (all channels or a whitelist), allowed ping roles and cooldown; existing Quickstart messages and other settings are retained. The bot checks channel permissions before saving. A guide channel needs View Channel, Send Messages and Embed Links permissions.
+
+Unconfigured servers block `/ping_game` until a moderator enables channels through the wizard or `/config set_lfg_channels`. Existing saved configurations, including explicit allow-all settings, are retained. The individual configuration commands remain available for later adjustments.
+
 ### LFG Ping Defaults
+
+* **Channel access:** Pings are disabled in unconfigured servers. Setup enables only selected channels when a selection is made, or all channels when step 1 is left empty; `/config set_lfg_channels` can explicitly allow all channels.
 
 * **Per-game cooldown:** By default, the same game can be pinged once every **30 seconds** per server. Administrators can change this with `/config ping_cooldown`; setting it to `0` disables the per-game cooldown.
 * **Who may ping:** By default, **everyone** may use `/ping_game` in allowed LFG channels. Administrators can restrict the command to one or more roles with `/config ping_roles`.

@@ -344,7 +344,8 @@ async def test_ping_game_disallowed_channel(setup_test_db):
 
     interaction.response.send_message.assert_called_once()
     msg = interaction.response.send_message.call_args[0][0]
-    assert "LFG pings are not allowed in this channel" in msg
+    assert "LFG pings are not enabled in this channel" in msg
+    assert "/config setup_bot" in msg
 
 
 @pytest.mark.asyncio

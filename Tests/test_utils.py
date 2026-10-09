@@ -533,9 +533,9 @@ async def test_resolve_to_base_game_no_expansion(mock_post, monkeypatch, setup_t
 
 @pytest.mark.asyncio
 async def test_is_lfg_allowed_no_row(setup_test_db):
-    """Test is_lfg_allowed_in_channel returns True by default when no guild settings exist."""
+    """Test is_lfg_allowed_in_channel returns False by default when no guild settings exist."""
     allowed = await is_lfg_allowed_in_channel(12345, 111)
-    assert allowed is True
+    assert allowed is False
 
 
 @pytest.mark.asyncio
