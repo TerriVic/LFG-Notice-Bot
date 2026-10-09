@@ -66,19 +66,19 @@ A feature-rich Discord slash-command bot built with Python and `discord.py` that
 
 Run `/config setup_bot` inside the server with **Manage Messages** permission (or as the bot owner):
 
-1. Select up to 25 text channels where LFG pings are allowed.
+1. Select up to 25 text channels to restrict LFG pings to those channels. To apply no channel restriction, leave the selection empty or press **Continue — allow all channels**.
 2. Choose allowed ping roles, or **Everyone**.
 3. Choose a per-game cooldown; **10 minutes** is the recommended wizard option. Use `/config ping_cooldown` afterward for custom values.
 4. Choose a text channel for a new Quickstart guide, or skip it.
 5. Review the settings and click **Save setup**.
 
-Only the moderator who opened the wizard can use it while retaining permission. Canceling or timing out after five minutes of inactivity leaves settings unchanged. Saving replaces the allowed-channel whitelist, allowed ping roles and cooldown; existing Quickstart messages and other settings are retained. The bot checks channel permissions before saving. A guide channel needs View Channel, Send Messages and Embed Links permissions.
+Only the moderator who opened the wizard can use it while retaining permission. Canceling or timing out after five minutes of inactivity leaves settings unchanged. Saving replaces the channel access mode (all channels or a whitelist), allowed ping roles and cooldown; existing Quickstart messages and other settings are retained. The bot checks channel permissions before saving. A guide channel needs View Channel, Send Messages and Embed Links permissions.
 
 Unconfigured servers block `/ping_game` until a moderator enables channels through the wizard or `/config set_lfg_channels`. Existing saved configurations, including explicit allow-all settings, are retained. The individual configuration commands remain available for later adjustments.
 
 ### LFG Ping Defaults
 
-* **Channel access:** Pings are disabled in unconfigured servers. Setup enables only the selected channels; `/config set_lfg_channels` can explicitly allow all channels.
+* **Channel access:** Pings are disabled in unconfigured servers. Setup enables only selected channels when a selection is made, or all channels when step 1 is left empty; `/config set_lfg_channels` can explicitly allow all channels.
 
 * **Per-game cooldown:** By default, the same game can be pinged once every **30 seconds** per server. Administrators can change this with `/config ping_cooldown`; setting it to `0` disables the per-game cooldown.
 * **Who may ping:** By default, **everyone** may use `/ping_game` in allowed LFG channels. Administrators can restrict the command to one or more roles with `/config ping_roles`.

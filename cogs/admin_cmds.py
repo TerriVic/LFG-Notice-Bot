@@ -162,7 +162,7 @@ class ServerSetupView(discord.ui.View):
 
     def content(self):
         if self.step == 0:
-            return "**Setup 1/5 — Allowed channels**\nSelect up to 25 text channels for LFG pings. Nothing changes until you save."
+            return "**Setup 1/5 — Allowed channels**\nSelect up to 25 text channels to restrict LFG pings, or press Continue — allow all channels for no channel restriction. Nothing changes until you save."
         if self.step == 1:
             return "**Setup 2/5 — Who can ping?**\nSelect allowed roles, or choose Everyone. This replaces any existing ping-role restrictions."
         if self.step == 2:
@@ -170,7 +170,7 @@ class ServerSetupView(discord.ui.View):
         if self.step == 3:
             return "**Setup 4/5 — Quickstart guide**\nChoose a text channel for a new guide, or skip. Existing guide messages are kept."
         roles = " ".join(f"<@&{r}>" for r in self.role_ids) or "Everyone"
-        channels = " ".join(f"<#{c}>" for c in self.channel_ids)
+        channels = " ".join(f"<#{c}>" for c in self.channel_ids) or "All channels (no channel restriction)"
         guide = f"<#{self.guide_channel_id}>" if self.guide_channel_id else "Skip"
         return (f"**Setup 5/5 — Review**\nAllowed channels: {channels}\n"
                 f"Allowed ping roles: {roles}\nSame-game cooldown: {self.cooldown} seconds\n"
@@ -185,7 +185,7 @@ class ServerSetupView(discord.ui.View):
         self.clear_items()
         if self.step in (0, 3):
             item = discord.ui.ChannelSelect(channel_types=[discord.ChannelType.text],
-                min_values=1, max_values=25 if self.step == 0 else 1)
+                min_values=0 if self.step == 0 else 1, max_values=25 if self.step == 0 else 1)
             async def select_channels(interaction):
                 ids = [c.id for c in item.values]
                 if self.step == 0:
@@ -195,6 +195,11 @@ class ServerSetupView(discord.ui.View):
                 await self.advance(interaction)
             item.callback = select_channels
             self.add_item(item)
+            if self.step == 0:
+                async def allow_all(interaction):
+                    self.channel_ids = []
+                    await self.advance(interaction)
+                self.button("Continue — allow all channels", allow_all)
             if self.step == 3:
                 async def skip(interaction):
                     self.guide_channel_id = None
@@ -269,7 +274,7 @@ class ServerSetupView(discord.ui.View):
                     raise ValueError("An allowed channel was deleted. Go back and choose channels again.")
                 permissions = channel.permissions_for(self.guild.me)
                 if not (permissions.view_channel and permissions.send_messages):
-                    raise ValueError(f"I need View Channel and Send Messages in {channel.mention}.")
+                    raise ValueError(f"Cannot enable {channel.mention} for LFG pings: I need View Channel and Send Messages permissions.")
             if any(self.guild.get_role(role_id) is None for role_id in self.role_ids):
                 raise ValueError("An allowed role was deleted. Go back and choose roles again.")
             if self.guide_channel_id:
@@ -285,11 +290,12 @@ class ServerSetupView(discord.ui.View):
                 await db.execute("BEGIN IMMEDIATE")
                 await db.execute("""INSERT INTO guild_lfg_settings
                     (guild_id, mode, whitelisted_channels, game_ping_cooldown_seconds)
-                    VALUES (?, 'whitelist', ?, ?)
+                    VALUES (?, ?, ?, ?)
                     ON CONFLICT(guild_id) DO UPDATE SET mode=excluded.mode,
                     whitelisted_channels=excluded.whitelisted_channels,
                     game_ping_cooldown_seconds=excluded.game_ping_cooldown_seconds""",
-                    (self.guild.id, ",".join(map(str, self.channel_ids)), self.cooldown))
+                    (self.guild.id, "whitelist" if self.channel_ids else "all",
+                     ",".join(map(str, self.channel_ids)), self.cooldown))
                 await db.execute("DELETE FROM guild_ping_roles WHERE guild_id=?", (self.guild.id,))
                 await db.executemany("INSERT INTO guild_ping_roles (guild_id, role_id) VALUES (?, ?)",
                     [(self.guild.id, role_id) for role_id in self.role_ids])

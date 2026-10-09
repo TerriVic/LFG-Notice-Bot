@@ -128,3 +128,37 @@ async def test_setup_successful_guide_is_tracked(setup_context, monkeypatch):
         assert await (await db.execute('SELECT message_id, guild_id, channel_id FROM quickstart_messages')).fetchone() == (77, 1, 10)
         assert await (await db.execute('SELECT role_id FROM guild_ping_roles')).fetchall() == []
     assert view.is_finished()
+
+
+@pytest.mark.asyncio
+async def test_setup_empty_channel_selection_saves_all_mode(setup_context):
+    path, origin, interaction, _ = setup_context
+    view = ServerSetupView(None, origin)
+    view.step = 4
+    assert "All channels (no channel restriction)" in view.content()
+    await view.save(interaction)
+    async with aiosqlite.connect(path) as db:
+        assert await (await db.execute('SELECT mode, whitelisted_channels FROM guild_lfg_settings')).fetchone() == ('all', '')
+    assert view.is_finished()
+
+
+@pytest.mark.asyncio
+async def test_setup_continue_clears_previous_whitelist_draft(setup_context):
+    _, origin, interaction, _ = setup_context
+    view = ServerSetupView(None, origin)
+    view.channel_ids = [10]
+    button = next(item for item in view.children if isinstance(item, discord.ui.Button) and item.label == 'Continue — allow all channels')
+    await button.callback(interaction)
+    assert view.channel_ids == []
+    assert view.step == 1
+
+
+@pytest.mark.asyncio
+async def test_setup_empty_select_advances_without_restriction(setup_context):
+    _, origin, interaction, _ = setup_context
+    view = ServerSetupView(None, origin)
+    select = next(item for item in view.children if isinstance(item, discord.ui.ChannelSelect))
+    assert select.min_values == 0
+    await select.callback(interaction)
+    assert view.channel_ids == []
+    assert view.step == 1

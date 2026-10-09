@@ -1081,7 +1081,7 @@ class UserCommands(commands.Cog):
                 name="Server Setup",
                 value=(
                     f"• {fmt(self.bot, 'config', 'setup_bot')} — Private wizard: allowed channels, ping roles, same-game cooldown and optional Quickstart guide.\n"
-                    "New servers have LFG pings disabled until channels are enabled. Review and save to apply setup; canceling or timing out leaves settings unchanged."
+                    "Step 1: select channels to restrict pings, or Continue — allow all channels for no channel restriction. New servers block pings until configured. Review and save to apply; canceling or timing out changes nothing."
                 ),
                 inline=False
             )
