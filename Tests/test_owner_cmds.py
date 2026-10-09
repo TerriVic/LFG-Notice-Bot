@@ -396,3 +396,47 @@ async def test_delete_bot_message_forbidden_exception(owner_cog, mock_ctx, patch
 
     mock_ctx.send.assert_awaited_once()
     assert "Missing permissions to read or delete messages" in mock_ctx.send.call_args[0][0]
+
+
+@pytest.mark.asyncio
+@patch('cogs.owner_cmds.os.path.exists', return_value=True)
+@patch('cogs.owner_cmds.discord.File', return_value="mock_db_file")
+async def test_getdb_blocked_dm_never_posts_attachment(mock_file, mock_exists, owner_cog, mock_ctx, patch_owner_id):
+    mock_ctx.author.send = AsyncMock(side_effect=discord.Forbidden(MagicMock(status=403), "DM blocked"))
+    await owner_cog.send_database_file(owner_cog, mock_ctx)
+    mock_ctx.send.assert_awaited_once()
+    assert "only sent privately" in mock_ctx.send.await_args.args[0]
+    assert "file" not in mock_ctx.send.await_args.kwargs
+    mock_file.assert_called_once()
+
+
+@pytest.mark.asyncio
+@patch('cogs.owner_cmds.os.path.exists', return_value=True)
+@patch('cogs.owner_cmds.discord.File', return_value="mock_db_file")
+async def test_getdb_unexpected_failure_reaches_shared_handler(mock_file, mock_exists, owner_cog, mock_ctx, patch_owner_id):
+    mock_ctx.author.send = AsyncMock(side_effect=RuntimeError("private diagnostic"))
+    with pytest.raises(RuntimeError, match="private diagnostic"):
+        await owner_cog.send_database_file(owner_cog, mock_ctx)
+    mock_ctx.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@patch('cogs.owner_cmds.os.path.exists')
+@patch('cogs.owner_cmds.discord.File')
+async def test_getdb_non_owner_cannot_export(mock_file, mock_exists, owner_cog, mock_ctx, patch_owner_id):
+    mock_ctx.author.id = 999999
+    await owner_cog.send_database_file(owner_cog, mock_ctx)
+    mock_file.assert_not_called()
+    mock_exists.assert_not_called()
+    mock_ctx.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@patch('cogs.owner_cmds.os.path.exists', return_value=True)
+@patch('cogs.owner_cmds.discord.File', return_value="mock_db_file")
+async def test_getdb_invoked_in_dm_sends_only_private_file(mock_file, mock_exists, owner_cog, mock_ctx, patch_owner_id):
+    mock_ctx.guild = None
+    mock_ctx.author.send = AsyncMock()
+    await owner_cog.send_database_file(owner_cog, mock_ctx)
+    mock_ctx.author.send.assert_awaited_once()
+    mock_ctx.send.assert_not_awaited()

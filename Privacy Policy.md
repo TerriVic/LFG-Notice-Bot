@@ -37,6 +37,11 @@ Stored data is used exclusively to:
 * **Setup Drafts:** The `/config setup_bot` wizard temporarily holds the initiating moderator's Discord User ID and selected channels, roles, cooldown and optional guide channel in memory. Draft settings are not written to the database until Save setup is confirmed. Canceling or timing out leaves existing settings unchanged; the wizard expires after five minutes of inactivity. If a guide is posted, its Message, Channel and Server IDs are stored for later updates or removal.
 * **Server Anti-Spam Configuration:** Allowed ping-role settings and the per-game cooldown value remain until a server administrator changes them. Setting the ping cooldown to `0` disables it and clears stored per-game cooldown state for that server. Cooldown state is otherwise replaced as new successful pings occur.
 
+* **Server Removal:** When the bot observes removal from a server, it deletes that server's configuration, ping-role restrictions, cooldown state, guide/tracker registrations and server-specific user preferences. Global game subscriptions and global preferences remain until removed by the user. Temporary server outages do not trigger this cleanup.
+* **Operational Statistics:** Aggregate process counters cover completed LFG pings, IGDB requests/final failures and unexpected command errors. They are held in memory, reset at restart, and do not retain User IDs, Server IDs, game names or message contents. The bot owner can view these counters along with current server count and uptime.
+* **Diagnostic Logs:** Unexpected command failures are logged with command names and exception tracebacks for troubleshooting. Exception text may incidentally include IDs or other context. Diagnostic logs are separate from user preferences and are not erased by `/delete_all_my_data`; their retention is controlled by the hosting operator.
+* **Privacy Information:** `/privacy` provides a summary, data-deletion options and contact details, plus a link to the full policy when configured by the operator.
+
 ## 5. Contact
 If you have questions or privacy concerns regarding LFG Notice Bot, please contact the bot developer or server administrator.
 

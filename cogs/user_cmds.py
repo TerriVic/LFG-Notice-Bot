@@ -4,6 +4,9 @@ import re
 import time
 
 import aiosqlite
+from operations import stats
+import os
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -556,6 +559,9 @@ class UserCommands(commands.Cog):
             )
             notified_ids.update(batch_ids)
 
+        # One completed LFG call, regardless of how many mention batches it sent.
+        stats.increment("pings_sent")
+
     @app_commands.command(name="set_ping_template", description="Customize how your /ping_game calls look")
     @app_commands.describe(template="Your custom message. Placeholders: {caller}, {game}, {mentions}, {note}")
     async def set_ping_template(self, interaction: discord.Interaction, template: str):
@@ -1036,6 +1042,40 @@ class UserCommands(commands.Cog):
                 ephemeral=True
             )
 
+    @app_commands.command(name="privacy", description="View data practices, deletion options and privacy contact")
+    async def privacy(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="LFG Notice Bot — Privacy",
+            description=(
+                "Game subscriptions are global across servers where you and the bot are present. "
+                "The bot stores Discord IDs, game subscriptions, notification preferences, "
+                "custom templates and server configuration. Operational counters are aggregate "
+                "and kept in memory until restart; they contain no user IDs or message contents. "
+                "Unexpected errors are logged for troubleshooting."
+            ),
+            color=discord.Color.blue(),
+        )
+        embed.add_field(
+            name="Delete your data",
+            value=f"Use {fmt(self.bot, 'unsubscribe')}, {fmt(self.bot, 'delete_my_subscriptions')} or {fmt(self.bot, 'delete_all_my_data')}.",
+            inline=False,
+        )
+        embed.add_field(
+            name="Contact",
+            value=os.getenv("PRIVACY_CONTACT") or "badhuntilian@gmail.com",
+            inline=False,
+        )
+        policy_url = (os.getenv("PRIVACY_POLICY_URL") or "").strip()
+        if policy_url.startswith(("https://", "http://")):
+            embed.add_field(name="Full privacy policy", value=policy_url, inline=False)
+        else:
+            embed.add_field(
+                name="Full privacy policy",
+                value="Ask the bot developer or your server administrator for the full policy.",
+                inline=False,
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     @app_commands.command(name="help", description="Show information about available bot commands")
     @app_commands.describe(public="Set to True to send response publicly in channel (Default: False)")
     async def help_command(self, interaction: discord.Interaction, public: bool = False):
@@ -1090,6 +1130,7 @@ class UserCommands(commands.Cog):
             name="Info",
             value=(
                 f"• {fmt(self.bot, 'help')} — View this help message.\n"
+                f"• {fmt(self.bot, 'privacy')} — View privacy, deletion options and contact.\n"
                 f"• {fmt(self.bot, 'quickstart')} — View quickstart message."
             ),
             inline=False

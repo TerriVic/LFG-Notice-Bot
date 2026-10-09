@@ -198,6 +198,15 @@ async def init_db():
             "idx_live_top_games_guild ON live_top_games(guild_id);"
         )
 
+        # Existing primary keys cover user-first and guild-first lookups.
+        for index_name, table_name, columns in (
+            ("idx_subscriptions_game", "subscriptions", "game_id"),
+            ("idx_user_guild_settings_guild", "user_guild_settings", "guild_id"),
+            ("idx_user_settings_guild", "user_settings", "guild_id"),
+            ("idx_quickstart_messages_guild", "quickstart_messages", "guild_id"),
+        ):
+            await db.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name}({columns})")
+
         await db.commit()
 
         # ---------------------------------------------------------------------
@@ -413,3 +422,14 @@ async def auto_migrate_multiplayer_flags():
             await db.execute("VACUUM")
 
     print(f"[Auto-Migration] Successfully pruned {deleted_count} unassigned single-player games from local database.")
+
+async def delete_guild_data(guild_id: int):
+    """Atomically remove server-specific records; retain global user profiles."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        for table in (
+            "guild_lfg_settings", "guild_game_ping_state", "guild_ping_roles",
+            "quickstart_messages", "live_top_games", "user_guild_settings",
+            "user_settings",
+        ):
+            await db.execute(f"DELETE FROM {table} WHERE guild_id = ?", (guild_id,))
+        await db.commit()
