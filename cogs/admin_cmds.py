@@ -132,6 +132,194 @@ async def update_quickstart_messages(
 
     return updated_count
 
+class ServerSetupView(discord.ui.View):
+    """Private draft; no settings are written until the review is confirmed."""
+
+    def __init__(self, bot, interaction):
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.origin = interaction
+        self.user_id = interaction.user.id
+        self.guild = interaction.guild
+        self.step = 0
+        self.channel_ids = []
+        self.role_ids = []
+        self.cooldown = 600
+        self.guide_channel_id = None
+        self.saving = False
+        self.render()
+
+    async def interaction_check(self, interaction):
+        allowed = (interaction.user.id == self.user_id and
+                   interaction.guild_id == self.guild.id and
+                   (interaction.user.id == get_bot_owner_id() or
+                    interaction.permissions.manage_messages))
+        if not allowed:
+            await interaction.response.send_message(
+                "Only the moderator who opened this setup can use it, with current moderator permissions.",
+                ephemeral=True)
+        return allowed and not self.saving and not self.is_finished()
+
+    def content(self):
+        if self.step == 0:
+            return "**Setup 1/5 — Allowed channels**\nSelect up to 25 text channels for LFG pings. Nothing changes until you save."
+        if self.step == 1:
+            return "**Setup 2/5 — Who can ping?**\nSelect allowed roles, or choose Everyone. This replaces any existing ping-role restrictions."
+        if self.step == 2:
+            return "**Setup 3/5 — Same-game cooldown**\nChoose how long everyone must wait before pinging the same game again. The individual 30-second cooldown also applies."
+        if self.step == 3:
+            return "**Setup 4/5 — Quickstart guide**\nChoose a text channel for a new guide, or skip. Existing guide messages are kept."
+        roles = " ".join(f"<@&{r}>" for r in self.role_ids) or "Everyone"
+        channels = " ".join(f"<#{c}>" for c in self.channel_ids)
+        guide = f"<#{self.guide_channel_id}>" if self.guide_channel_id else "Skip"
+        return (f"**Setup 5/5 — Review**\nAllowed channels: {channels}\n"
+                f"Allowed ping roles: {roles}\nSame-game cooldown: {self.cooldown} seconds\n"
+                f"New Quickstart guide: {guide}\n\nSave replaces the server's channel, role and cooldown settings. Other settings are kept.")
+
+    def button(self, label, callback, style=discord.ButtonStyle.secondary):
+        item = discord.ui.Button(label=label, style=style)
+        item.callback = callback
+        self.add_item(item)
+
+    def render(self):
+        self.clear_items()
+        if self.step in (0, 3):
+            item = discord.ui.ChannelSelect(channel_types=[discord.ChannelType.text],
+                min_values=1, max_values=25 if self.step == 0 else 1)
+            async def select_channels(interaction):
+                ids = [c.id for c in item.values]
+                if self.step == 0:
+                    self.channel_ids = ids
+                else:
+                    self.guide_channel_id = ids[0]
+                await self.advance(interaction)
+            item.callback = select_channels
+            self.add_item(item)
+            if self.step == 3:
+                async def skip(interaction):
+                    self.guide_channel_id = None
+                    await self.advance(interaction)
+                self.button("Skip guide", skip)
+        elif self.step == 1:
+            item = discord.ui.RoleSelect(min_values=1, max_values=25)
+            async def select_roles(interaction):
+                self.role_ids = [r.id for r in item.values]
+                await self.advance(interaction)
+            item.callback = select_roles
+            self.add_item(item)
+            async def everyone(interaction):
+                self.role_ids = []
+                await self.advance(interaction)
+            self.button("Everyone", everyone)
+        elif self.step == 2:
+            item = discord.ui.Select(options=[discord.SelectOption(label=label, value=str(seconds))
+                for label, seconds in [("30 seconds", 30), ("1 minute", 60), ("5 minutes", 300),
+                                       ("10 minutes (recommended)", 600), ("30 minutes", 1800),
+                                       ("1 hour", 3600), ("Disabled", 0)]])
+            async def select_cooldown(interaction):
+                self.cooldown = int(item.values[0])
+                await self.advance(interaction)
+            item.callback = select_cooldown
+            self.add_item(item)
+        else:
+            self.button("Save setup", self.save, discord.ButtonStyle.success)
+        if self.step:
+            async def back(interaction):
+                self.step -= 1
+                self.render()
+                await interaction.response.edit_message(content=self.content(), view=self,
+                    allowed_mentions=discord.AllowedMentions.none())
+            self.button("Back", back)
+        self.button("Cancel", self.cancel, discord.ButtonStyle.danger)
+
+    async def advance(self, interaction):
+        self.step += 1
+        self.render()
+        await interaction.response.edit_message(content=self.content(), view=self,
+            allowed_mentions=discord.AllowedMentions.none())
+
+    async def cancel(self, interaction):
+        self.stop()
+        await interaction.response.edit_message(content="Setup canceled. No settings changed.", view=None)
+
+    async def on_timeout(self):
+        try:
+            await self.origin.edit_original_response(content="Setup expired. No settings changed. Run `/config setup_bot` again.", view=None)
+        except discord.HTTPException:
+            pass
+
+    async def on_error(self, interaction, error, item):
+        import logging
+        logging.getLogger(__name__).error("Server setup failed", exc_info=(type(error), error, error.__traceback__))
+        message = "Setup failed. Please run `/config setup_bot` again."
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+
+    async def save(self, interaction):
+        self.saving = True
+        await interaction.response.defer()
+        guide_message = None
+        saved = False
+        try:
+            for channel_id in self.channel_ids:
+                channel = self.guild.get_channel(channel_id)
+                if not isinstance(channel, discord.TextChannel):
+                    raise ValueError("An allowed channel was deleted. Go back and choose channels again.")
+                permissions = channel.permissions_for(self.guild.me)
+                if not (permissions.view_channel and permissions.send_messages):
+                    raise ValueError(f"I need View Channel and Send Messages in {channel.mention}.")
+            if any(self.guild.get_role(role_id) is None for role_id in self.role_ids):
+                raise ValueError("An allowed role was deleted. Go back and choose roles again.")
+            if self.guide_channel_id:
+                channel = self.guild.get_channel(self.guide_channel_id)
+                if not isinstance(channel, discord.TextChannel):
+                    raise ValueError("The guide channel was deleted. Choose another channel or skip.")
+                permissions = channel.permissions_for(self.guild.me)
+                if not (permissions.view_channel and permissions.send_messages and permissions.embed_links):
+                    raise ValueError(f"I need View Channel, Send Messages and Embed Links in {channel.mention}.")
+                guide_message = await channel.send(embed=build_quickstart_embed(self.bot),
+                    allowed_mentions=discord.AllowedMentions.none())
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("BEGIN IMMEDIATE")
+                await db.execute("""INSERT INTO guild_lfg_settings
+                    (guild_id, mode, whitelisted_channels, game_ping_cooldown_seconds)
+                    VALUES (?, 'whitelist', ?, ?)
+                    ON CONFLICT(guild_id) DO UPDATE SET mode=excluded.mode,
+                    whitelisted_channels=excluded.whitelisted_channels,
+                    game_ping_cooldown_seconds=excluded.game_ping_cooldown_seconds""",
+                    (self.guild.id, ",".join(map(str, self.channel_ids)), self.cooldown))
+                await db.execute("DELETE FROM guild_ping_roles WHERE guild_id=?", (self.guild.id,))
+                await db.executemany("INSERT INTO guild_ping_roles (guild_id, role_id) VALUES (?, ?)",
+                    [(self.guild.id, role_id) for role_id in self.role_ids])
+                if self.cooldown == 0:
+                    await db.execute("DELETE FROM guild_game_ping_state WHERE guild_id=?", (self.guild.id,))
+                if guide_message:
+                    await db.execute("INSERT INTO quickstart_messages (message_id, guild_id, channel_id, created_at) VALUES (?, ?, ?, ?)",
+                        (guide_message.id, self.guild.id, self.guide_channel_id, int(time.time())))
+                await db.commit()
+                saved = True
+        except Exception as error:
+            cleanup_note = ""
+            if guide_message and not saved:
+                try:
+                    await guide_message.delete()
+                except discord.HTTPException:
+                    cleanup_note = " A guide message could not be removed; please delete it manually."
+            self.saving = False
+            if isinstance(error, ValueError):
+                await interaction.followup.send(str(error), ephemeral=True)
+                return
+            await interaction.followup.send("Setup could not be saved. No settings changed." + cleanup_note, ephemeral=True)
+            import logging
+            logging.getLogger(__name__).exception("Unable to save server setup")
+            return
+        self.stop()
+        await interaction.edit_original_response(content="✅ Setup saved.\n" + self.content(), view=None,
+            allowed_mentions=discord.AllowedMentions.none())
+
+
 class AdminCommands(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -141,6 +329,13 @@ class AdminCommands(commands.Cog):
         name="config",
         description="Server configuration commands"
     )
+
+    @mod_group.command(name="setup_bot", description="Guided server setup: channels, ping roles, cooldown and Quickstart")
+    @app_commands.guild_only()
+    @is_owner_or_moderator()
+    async def server_setup(self, interaction: discord.Interaction):
+        view = ServerSetupView(self.bot, interaction)
+        await interaction.response.send_message(content=view.content(), view=view, ephemeral=True)
 
     @mod_group.command(name="setup_top_games", description="Post a live-updating top games message in this channel")
     @app_commands.describe(
@@ -630,7 +825,7 @@ class AdminCommands(commands.Cog):
                 row = await cursor.fetchone()
 
         if not row:
-            await interaction.followup.send("⚙️ LFG channel settings are currently set to **default (Allow All Channels)**.", ephemeral=True)
+            await interaction.followup.send("⚙️ LFG channel settings are currently set to **default (Pings disabled — run /config setup_bot)**.", ephemeral=True)
             return
 
         mode, channels_str = row
@@ -719,8 +914,8 @@ class AdminCommands(commands.Cog):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 """
-                INSERT INTO guild_lfg_settings (guild_id, game_ping_cooldown_seconds)
-                VALUES (?, ?)
+                INSERT INTO guild_lfg_settings (guild_id, mode, game_ping_cooldown_seconds)
+                VALUES (?, 'none', ?)
                 ON CONFLICT(guild_id) DO UPDATE SET
                     game_ping_cooldown_seconds = excluded.game_ping_cooldown_seconds
                 """,

@@ -56,7 +56,7 @@ async def init_db():
         await db.execute("""
                          CREATE TABLE IF NOT EXISTS guild_lfg_settings (
                                                                            guild_id INTEGER PRIMARY KEY,
-                                                                           mode TEXT NOT NULL DEFAULT 'all',
+                                                                           mode TEXT NOT NULL DEFAULT 'none',
                                                                            whitelisted_channels TEXT NOT NULL DEFAULT '',
                                                                            game_ping_cooldown_seconds INTEGER NOT NULL DEFAULT 30
                          );
@@ -174,7 +174,7 @@ async def init_db():
         })
 
         await ensure_columns(db, "guild_lfg_settings", {
-            "mode": "TEXT NOT NULL DEFAULT 'all'",
+            "mode": "TEXT NOT NULL DEFAULT 'none'",
             "whitelisted_channels": "TEXT NOT NULL DEFAULT ''",
             "game_ping_cooldown_seconds": "INTEGER NOT NULL DEFAULT 30"
         })

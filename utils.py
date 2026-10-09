@@ -634,7 +634,7 @@ async def is_lfg_allowed_in_channel(guild_id: int, channel_id: int) -> bool:
             row = await cursor.fetchone()
 
     if not row:
-        return True  # Default: allowed everywhere
+        return False  # Unconfigured servers must explicitly enable LFG channels
 
     mode, raw_whitelisted = row
     if mode == "all":
@@ -645,7 +645,7 @@ async def is_lfg_allowed_in_channel(guild_id: int, channel_id: int) -> bool:
         allowed_ids = set(raw_whitelisted.split(",")) if raw_whitelisted else set()
         return str(channel_id) in allowed_ids
 
-    return True
+    return False
 
 def format_interval(hours: float) -> str:
     """Helper to cleanly format update intervals into minutes or hours."""

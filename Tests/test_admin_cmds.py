@@ -849,7 +849,7 @@ async def test_view_lfg_channels_unconfigured_default(admin_cog, mock_interactio
 
     mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
     mock_interaction.followup.send.assert_awaited_once_with(
-        "⚙️ LFG channel settings are currently set to **default (Allow All Channels)**.", ephemeral=True
+        "⚙️ LFG channel settings are currently set to **default (Pings disabled — run /config setup_bot)**.", ephemeral=True
     )
 
 
