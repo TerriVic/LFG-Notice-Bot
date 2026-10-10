@@ -62,6 +62,7 @@ def make_mock_interaction(user_id=12345, guild_id=999, channel_id=888):
         # Mock member lookup
         mock_member = MagicMock()
         mock_member.id = user_id
+        mock_member.display_name = "TestPlayer"
         interaction.guild.get_member = lambda uid: mock_member
     else:
         interaction.guild = None
@@ -322,7 +323,7 @@ async def test_ping_game_blocked_by_server_game_cooldown(setup_test_db):
 
     subscriber = MagicMock()
     subscriber.id = 202
-    interaction.guild.get_member = lambda uid: subscriber if uid == 202 else MagicMock(id=uid)
+    interaction.guild.get_member = lambda uid: subscriber if uid == 202 else MagicMock(id=uid, display_name="Caller")
 
     async with aiosqlite.connect(setup_test_db) as db:
         await db.execute("INSERT INTO subscriptions (user_id, game_id) VALUES (?, ?)", (202, 1))
@@ -372,7 +373,7 @@ async def test_ping_game_success(setup_test_db, cleanup_failure):
     # Ensure guild.get_member returns valid member objects for both caller and subscriber
     sub_member = MagicMock()
     sub_member.id = 202
-    caller_interaction.guild.get_member = lambda uid: sub_member if uid == 202 else MagicMock(id=uid)
+    caller_interaction.guild.get_member = lambda uid: sub_member if uid == 202 else MagicMock(id=uid, display_name="Caller")
 
     # Seed subscriber user 202
     async with aiosqlite.connect(setup_test_db) as db:
@@ -396,7 +397,7 @@ async def test_ping_game_success(setup_test_db, cleanup_failure):
     send_kwargs = caller_interaction.channel.send.await_args.kwargs
     assert send_kwargs["silent"] is False
     allowed_mentions = send_kwargs["allowed_mentions"]
-    assert [user.id for user in allowed_mentions.users] == [202]
+    assert allowed_mentions.users is True
     assert allowed_mentions.roles is False
     assert allowed_mentions.everyone is False
 
@@ -462,7 +463,8 @@ async def test_ping_game_with_custom_template(mock_resolve, mock_lfg_allowed, se
 
     sent_msg = interaction.channel.send.await_args.args[0]
 
-    assert "Custom alert by <@101> for **Elden Ring**!" in sent_msg
+    assert "Custom alert by TestPlayer for **Elden Ring**!" in sent_msg
+    assert "<@101>" not in sent_msg
     assert "<@102>" in sent_msg
     assert "Need a tank" in sent_msg
 
@@ -500,16 +502,17 @@ async def test_ping_game_with_quiet_users(mock_resolve, mock_lfg_allowed, setup_
     # 3. Act: Invoke ping_game
     await cog.ping_game.callback(cog, interaction, game="Portal 2", note="Let's play co-op!")
 
-    # 4. Quiet subscribers remain visible, but AllowedMentions prevents notifications.
+    # 4. Quiet subscribers are plain names, not user mention tokens.
     interaction.response.defer.assert_awaited_once_with(ephemeral=True)
     interaction.channel.send.assert_awaited_once()
     interaction.delete_original_response.assert_awaited_once()
     interaction.followup.send.assert_not_awaited()
 
     sent_msg = interaction.channel.send.await_args.args[0]
-    assert "<@202>" in sent_msg
+    assert "QuietPlayer" in sent_msg
+    assert "<@202>" not in sent_msg
     allowed_mentions = interaction.channel.send.await_args.kwargs["allowed_mentions"]
-    assert allowed_mentions.users is False
+    assert allowed_mentions.users is True
     assert allowed_mentions.roles is False
     assert allowed_mentions.everyone is False
     assert "has quiet mode turned on" in sent_msg
@@ -1219,6 +1222,7 @@ async def test_ping_game_many_batches_preserves_quiet_mode_and_notifies_once(mon
         interaction.channel.send.side_effect = [None, RuntimeError("send failed")]
     ids = list(range(100000000000000000, 100000000000000400))
     rows = [(uid, i % 2) for i, uid in enumerate(ids)]
+    interaction.guild.get_member = lambda uid: MagicMock(id=uid, display_name=f"Player-{uid}")
     # Duplicate placeholders exercise repeated subscriber mentions across batches.
     template = "{caller} {game}: {mentions}\n{mentions}\n{note}"
     cursor_game = MagicMock()
@@ -1262,12 +1266,15 @@ async def test_ping_game_many_batches_preserves_quiet_mode_and_notifies_once(mon
         assert call.kwargs["silent"] is False
         allowed = call.kwargs["allowed_mentions"]
         assert allowed.roles is False and allowed.everyone is False
-        assert all(user.id != 999999999999999999 for user in (allowed.users or []))
-        batch_ids = [user.id for user in (allowed.users or [])]
+        assert allowed.users is True
+        assert "<@999999999999999999>" not in message
+        batch_ids = [int(uid) for uid in re.findall(r"<@!?(\d+)>", message)]
         assert len(batch_ids) <= 100
         assert all(f"<@{uid}>" in message for uid in batch_ids)
         notified.extend(batch_ids)
     assert sorted(notified) == ids[::2]
-    text = "".join(call.args[0] for call in calls)
-    assert all(f"<@{uid}>" in text for uid in ids)
+    text = calls[0].args[0] + "".join(call.args[0].removeprefix("**LFG ping continued:**\n") for call in calls[1:])
+    assert all(f"<@{uid}>" in text for uid in ids[::2])
+    assert all(f"<@{uid}>" not in text for uid in ids[1::2])
+    assert all(f"Player-{uid}" in text for uid in ids[1::2])
     assert "Let's play!" in text

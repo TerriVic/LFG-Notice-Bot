@@ -471,11 +471,13 @@ class UserCommands(commands.Cog):
             if row[1] == 1
         ]
 
-        # 8. Build the ping message
-        all_mentions = " ".join(
-            f"<@{row[0]}>"
-            for row in rows
-        )
+        # Only active subscribers enter the ping placeholders.
+        all_mentions = " ".join(f"<@{uid}>" for uid in active_user_ids)
+
+        def plain_user_name(uid):
+            member = interaction.guild.get_member(uid)
+            name = member.display_name if member else "Unknown user"
+            return discord.utils.escape_mentions(discord.utils.escape_markdown(name))
 
         caller_mention = interaction.user.mention
         formatted_game = f"**{official_name}**"
@@ -504,7 +506,7 @@ class UserCommands(commands.Cog):
 
             # Make sure subscribers remain represented even if the user's
             # template does not contain {mentions}.
-            if all_mentions not in msg:
+            if all_mentions and all_mentions not in msg:
                 msg += f"\n{all_mentions}"
 
         else:
@@ -516,46 +518,42 @@ class UserCommands(commands.Cog):
             if clean_note:
                 msg += f"\n> {clean_note}"
 
-        # 9. Display quiet-mode users without actually notifying them
+        # Quiet users are plain display names, never notification mentions.
         if quiet_user_ids:
-            quiet_mentions_str = ", ".join(
-                f"<@{uid}>"
-                for uid in quiet_user_ids
-            )
+            quiet_names = ", ".join(plain_user_name(uid) for uid in quiet_user_ids)
+            verb = "has" if len(quiet_user_ids) == 1 else "have"
+            msg += f"\n\n-# {quiet_names} {verb} quiet mode turned on"
 
-            verb = (
-                "has"
-                if len(quiet_user_ids) == 1
-                else "have"
-            )
-
-            msg += (
-                f"\n\n-# {quiet_mentions_str} "
-                f"{verb} quiet mode turned on"
-            )
-
-        # 10. Send bounded public batches. Only active subscribers in the
-        # current batch may be notified, and repeated template/quiet-summary
-        # mentions must not notify the same subscriber again.
+        # Sanitize the complete text before splitting, so long display names
+        # cannot overflow batches and each active subscriber is pinged only once.
         active_ids = set(active_user_ids)
-        notified_ids = set()
+        seen_ids = set()
+
+        def eligible_mention(match):
+            uid = int(match.group(1))
+            if uid in active_ids and uid not in seen_ids:
+                seen_ids.add(uid)
+                return match.group(0)
+            return plain_user_name(uid)
+
+        msg = re.sub(r"<@!?(\d+)>", eligible_mention, msg)
+        allowed_mentions = discord.AllowedMentions(
+            users=True, roles=False, everyone=False, replied_user=False
+        )
         for message in split_ping_message(msg):
-            mentioned_ids = {
+            expected_ids = {
                 int(uid) for uid in re.findall(r"<@!?(\d+)>", message)
             }
-            batch_ids = (mentioned_ids & active_ids) - notified_ids
-            allowed_mentions = discord.AllowedMentions(
-                users=[discord.Object(id=uid) for uid in sorted(batch_ids)]
-                if batch_ids else False,
-                roles=False,
-                everyone=False
+            sent = await interaction.channel.send(
+                message, allowed_mentions=allowed_mentions, silent=False
             )
-            await interaction.channel.send(
-                message,
-                allowed_mentions=allowed_mentions,
-                silent=False,
-            )
-            notified_ids.update(batch_ids)
+            if isinstance(sent, discord.Message):
+                recognized_ids = {user.id for user in sent.mentions}
+                if expected_ids - recognized_ids:
+                    logging.getLogger("lfg.operations").warning(
+                        "LFG message %s: Discord recognized %s of %s intended user mentions",
+                        sent.id, len(expected_ids & recognized_ids), len(expected_ids),
+                    )
 
         # One completed LFG call, regardless of how many mention batches it sent.
         stats.increment("pings_sent")
