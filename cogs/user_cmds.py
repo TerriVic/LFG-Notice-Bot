@@ -1,4 +1,5 @@
 import datetime
+import logging
 import os
 import re
 import time
@@ -330,11 +331,8 @@ class UserCommands(commands.Cog):
             )
             return
 
-        # 3. Defer publicly because a successful LFG ping should be public.
-        #
-        # If we later discover an error/cooldown condition, we delete this
-        # deferred response and send a separate ephemeral follow-up instead.
-        await interaction.response.defer()
+        # Keep command status private; send actual pings as ordinary channel messages.
+        await interaction.response.defer(ephemeral=True)
 
         clean_game = (
             game.strip()
@@ -359,8 +357,7 @@ class UserCommands(commands.Cog):
                 row = await cursor.fetchone()
 
             if not row:
-                # The interaction was publicly deferred, so remove that response
-                # before sending a private error message.
+                # Remove the private deferred status before reporting the error.
                 await interaction.delete_original_response()
 
                 await interaction.followup.send(
@@ -450,10 +447,10 @@ class UserCommands(commands.Cog):
         if not cooldown_allowed:
             retry_timestamp = int(time.time()) + retry_after
 
-            # Remove the publicly deferred response first.
+            # Remove the private deferred status first.
             await interaction.delete_original_response()
 
-            # Now this is a genuinely separate ephemeral follow-up.
+            # Report the cooldown privately.
             await interaction.followup.send(
                 f"⏳ **{official_name}** was pinged recently. "
                 f"It can be pinged again <t:{retry_timestamp}:R>.",
@@ -553,14 +550,23 @@ class UserCommands(commands.Cog):
                 roles=False,
                 everyone=False
             )
-            await interaction.followup.send(
+            await interaction.channel.send(
                 message,
-                allowed_mentions=allowed_mentions
+                allowed_mentions=allowed_mentions,
+                silent=False,
             )
             notified_ids.update(batch_ids)
 
         # One completed LFG call, regardless of how many mention batches it sent.
         stats.increment("pings_sent")
+
+        # A cleanup failure must not turn an already-sent ping into a command failure.
+        try:
+            await interaction.delete_original_response()
+        except discord.HTTPException:
+            logging.getLogger("lfg.operations").warning(
+                "Could not remove completed ping command status", exc_info=True
+            )
 
     @app_commands.command(name="set_ping_template", description="Customize how your /ping_game calls look")
     @app_commands.describe(template="Your custom message. Placeholders: {caller}, {game}, {mentions}, {note}")

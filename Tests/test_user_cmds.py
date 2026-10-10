@@ -72,6 +72,9 @@ def make_mock_interaction(user_id=12345, guild_id=999, channel_id=888):
     interaction.response.defer = AsyncMock()
     interaction.followup = AsyncMock()
     interaction.followup.send = AsyncMock()
+    interaction.channel = MagicMock()
+    interaction.channel.send = AsyncMock()
+    interaction.delete_original_response = AsyncMock()
 
     return interaction
 
@@ -355,10 +358,16 @@ async def test_ping_game_disallowed_channel(setup_test_db):
 
 
 @pytest.mark.asyncio
-async def test_ping_game_success(setup_test_db):
+@pytest.mark.parametrize("cleanup_failure", [False, True], ids=["status-deleted", "status-delete-failed"])
+async def test_ping_game_success(setup_test_db, cleanup_failure):
     """Test pinging game subscribers when LFG channel is allowed."""
     cog = UserCommands(bot=MagicMock())
     caller_interaction = make_mock_interaction(user_id=101, guild_id=999, channel_id=888)
+
+    if cleanup_failure:
+        caller_interaction.delete_original_response.side_effect = discord.HTTPException(
+            MagicMock(status=404, reason="Not Found"), "Unknown interaction"
+        )
 
     # Ensure guild.get_member returns valid member objects for both caller and subscriber
     sub_member = MagicMock()
@@ -387,7 +396,7 @@ async def test_ping_game_success(setup_test_db):
     send_kwargs = caller_interaction.channel.send.await_args.kwargs
     assert send_kwargs["silent"] is False
     allowed_mentions = send_kwargs["allowed_mentions"]
-    assert allowed_mentions.users is True
+    assert [user.id for user in allowed_mentions.users] == [202]
     assert allowed_mentions.roles is False
     assert allowed_mentions.everyone is False
 
@@ -491,15 +500,18 @@ async def test_ping_game_with_quiet_users(mock_resolve, mock_lfg_allowed, setup_
     # 3. Act: Invoke ping_game
     await cog.ping_game.callback(cog, interaction, game="Portal 2", note="Let's play co-op!")
 
-    # 4. Quiet subscribers appear by name, not as actual Discord ping mentions.
+    # 4. Quiet subscribers remain visible, but AllowedMentions prevents notifications.
     interaction.response.defer.assert_awaited_once_with(ephemeral=True)
     interaction.channel.send.assert_awaited_once()
     interaction.delete_original_response.assert_awaited_once()
     interaction.followup.send.assert_not_awaited()
 
     sent_msg = interaction.channel.send.await_args.args[0]
-    assert "QuietPlayer" in sent_msg
-    assert "<@202>" not in sent_msg
+    assert "<@202>" in sent_msg
+    allowed_mentions = interaction.channel.send.await_args.kwargs["allowed_mentions"]
+    assert allowed_mentions.users is False
+    assert allowed_mentions.roles is False
+    assert allowed_mentions.everyone is False
     assert "has quiet mode turned on" in sent_msg
 
 # -----------------------------------------------------------------------------
@@ -1204,7 +1216,7 @@ async def test_ping_game_many_batches_preserves_quiet_mode_and_notifies_once(mon
     cog = UserCommands(bot=MagicMock())
     interaction = make_mock_interaction(user_id=101)
     if partial_failure:
-        interaction.followup.send.side_effect = [None, RuntimeError("send failed")]
+        interaction.channel.send.side_effect = [None, RuntimeError("send failed")]
     ids = list(range(100000000000000000, 100000000000000400))
     rows = [(uid, i % 2) for i, uid in enumerate(ids)]
     # Duplicate placeholders exercise repeated subscriber mentions across batches.
@@ -1231,12 +1243,15 @@ async def test_ping_game_many_batches_preserves_quiet_mode_and_notifies_once(mon
             patch("cogs.user_cmds.claim_game_ping_cooldown", new=AsyncMock(return_value=(True, 0))):
         if partial_failure:
             with pytest.raises(RuntimeError, match="send failed"):
-                await cog.ping_game.callback(cog, interaction, game="Portal 2", note="Let's play!")
+                await cog.ping_game.callback(cog, interaction, game="Portal 2", note="Let's play! <@999999999999999999> <@&777> @everyone")
             assert counters.counters["pings_sent"] == 0
+            interaction.delete_original_response.assert_not_awaited()
             return
-        await cog.ping_game.callback(cog, interaction, game="Portal 2", note="Let's play!")
+        await cog.ping_game.callback(cog, interaction, game="Portal 2", note="Let's play! <@999999999999999999> <@&777> @everyone")
     assert counters.counters["pings_sent"] == 1
-    calls = interaction.followup.send.call_args_list
+    interaction.followup.send.assert_not_awaited()
+    interaction.delete_original_response.assert_awaited_once()
+    calls = interaction.channel.send.call_args_list
     assert len(calls) > 2
     notified = []
     for i, call in enumerate(calls):
@@ -1244,8 +1259,10 @@ async def test_ping_game_many_batches_preserves_quiet_mode_and_notifies_once(mon
         assert len(message) <= 2000
         if i:
             assert message.startswith("**LFG ping continued:**\n")
+        assert call.kwargs["silent"] is False
         allowed = call.kwargs["allowed_mentions"]
         assert allowed.roles is False and allowed.everyone is False
+        assert all(user.id != 999999999999999999 for user in (allowed.users or []))
         batch_ids = [user.id for user in (allowed.users or [])]
         assert len(batch_ids) <= 100
         assert all(f"<@{uid}>" in message for uid in batch_ids)
