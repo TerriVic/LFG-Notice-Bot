@@ -156,7 +156,7 @@ async def test_autocomplete_search_with_text_and_dlc(setup_test_db):
 
 
 @pytest.mark.asyncio
-@patch("aiohttp.ClientSession.post")
+@patch("utils.igdb.post")
 async def test_autocomplete_live_igdb_fetch(mock_post, setup_test_db):
     """Test autocomplete falling back to live IGDB API when local results are absent."""
     # Mock aiohttp response for IGDB API
@@ -175,7 +175,7 @@ async def test_autocomplete_live_igdb_fetch(mock_post, setup_test_db):
     mock_interaction.guild = None
     mock_interaction.command = None
 
-    with patch.dict(os.environ, {"TWITCH_CLIENT_ID": "mock_id", "TWITCH_ACCESS_TOKEN": "mock_token"}):
+    with patch.dict(os.environ, {"TWITCH_CLIENT_ID": "mock_id", "TWITCH_SECRET": "mock_token"}):
         choices = await autocomplete_games(mock_interaction, "Cyberpunk")
 
     assert len(choices) == 1
@@ -399,18 +399,18 @@ async def test_autocomplete_text_channels():
 async def test_fetch_game_details_missing_credentials(monkeypatch):
     """Test fetch_game_details_from_igdb returns None if environment credentials are missing."""
     monkeypatch.delenv("TWITCH_CLIENT_ID", raising=False)
-    monkeypatch.delenv("TWITCH_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("TWITCH_SECRET", raising=False)
 
     result = await fetch_game_details_from_igdb("Portal 2")
     assert result is None
 
 
 @pytest.mark.asyncio
-@patch("aiohttp.ClientSession.post")
+@patch("utils.igdb.post")
 async def test_fetch_game_details_success(mock_post, monkeypatch, setup_test_db):
     """Test fetch_game_details_from_igdb successfully queries and parses game details."""
     monkeypatch.setenv("TWITCH_CLIENT_ID", "mock_client_id")
-    monkeypatch.setenv("TWITCH_ACCESS_TOKEN", "mock_token")
+    monkeypatch.setenv("TWITCH_SECRET", "mock_token")
 
     mock_resp = AsyncMock()
     mock_resp.status = 200
@@ -435,11 +435,11 @@ async def test_fetch_game_details_success(mock_post, monkeypatch, setup_test_db)
 
 
 @pytest.mark.asyncio
-@patch("aiohttp.ClientSession.post")
+@patch("utils.igdb.post")
 async def test_fetch_and_cache_game_priorities(mock_post, monkeypatch, setup_test_db):
     """Test fetch_and_cache_game_from_igdb prioritizes exact matches, then category 0 games."""
     monkeypatch.setenv("TWITCH_CLIENT_ID", "mock_client_id")
-    monkeypatch.setenv("TWITCH_ACCESS_TOKEN", "mock_token")
+    monkeypatch.setenv("TWITCH_SECRET", "mock_token")
 
     # Mock response containing multiple candidates, testing selection priority
     mock_resp = AsyncMock()
@@ -466,11 +466,11 @@ async def test_fetch_and_cache_game_priorities(mock_post, monkeypatch, setup_tes
 
 
 @pytest.mark.asyncio
-@patch("aiohttp.ClientSession.post")
+@patch("utils.igdb.post")
 async def test_resolve_to_base_game_expansion(mock_post, monkeypatch, setup_test_db):
     """Test resolve_to_base_game correctly maps DLC/expansion to parent base game."""
     monkeypatch.setenv("TWITCH_CLIENT_ID", "mock_client_id")
-    monkeypatch.setenv("TWITCH_ACCESS_TOKEN", "mock_token")
+    monkeypatch.setenv("TWITCH_SECRET", "mock_token")
 
     # Side effect to handle multiple consecutive aiohttp posts (DLC lookup -> Parent lookup)
     mock_resp_dlc = AsyncMock()
@@ -507,11 +507,11 @@ async def test_resolve_to_base_game_expansion(mock_post, monkeypatch, setup_test
 
 
 @pytest.mark.asyncio
-@patch("aiohttp.ClientSession.post")
+@patch("utils.igdb.post")
 async def test_resolve_to_base_game_no_expansion(mock_post, monkeypatch, setup_test_db):
     """Test resolve_to_base_game returns original game if it is already a base game (category 0)."""
     monkeypatch.setenv("TWITCH_CLIENT_ID", "mock_client_id")
-    monkeypatch.setenv("TWITCH_ACCESS_TOKEN", "mock_token")
+    monkeypatch.setenv("TWITCH_SECRET", "mock_token")
 
     mock_resp = AsyncMock()
     mock_resp.status = 200
@@ -533,9 +533,9 @@ async def test_resolve_to_base_game_no_expansion(mock_post, monkeypatch, setup_t
 
 @pytest.mark.asyncio
 async def test_is_lfg_allowed_no_row(setup_test_db):
-    """Test is_lfg_allowed_in_channel returns True by default when no guild settings exist."""
+    """Test is_lfg_allowed_in_channel returns False by default when no guild settings exist."""
     allowed = await is_lfg_allowed_in_channel(12345, 111)
-    assert allowed is True
+    assert allowed is False
 
 
 @pytest.mark.asyncio

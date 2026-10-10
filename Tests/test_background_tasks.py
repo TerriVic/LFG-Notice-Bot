@@ -45,34 +45,16 @@ def mock_db_connect():
         yield mock_db, mock_cursor
 
 @pytest.fixture
-def mock_aiohttp_session():
-    with patch('cogs.background_tasks.aiohttp.ClientSession') as mock_session_class:
-        mock_session = AsyncMock()
-
-        # 1. Make ClientSession() work as an async context manager
-        class SessionContextManager:
-            async def __aenter__(self):
-                return mock_session
-            async def __aexit__(self, exc_type, exc_val, exc_tb):
-                pass
-
-        mock_session_class.return_value = SessionContextManager()
-
+def mock_igdb_client():
+    """Mock the shared transport; authentication is covered by client tests."""
+    with patch('cogs.background_tasks.igdb.post') as mock_post:
         mock_response = AsyncMock()
         mock_response.status = 200
         mock_response.json = AsyncMock(return_value=[])
-
-        # 2. Helper async context manager for session.post(...)
-        class PostContextManager:
-            async def __aenter__(self):
-                return mock_response
-            async def __aexit__(self, exc_type, exc_val, exc_tb):
-                pass
-
-        # 3. Use MagicMock for post so it returns the context manager directly without coroutine wrapping
-        mock_session.post = MagicMock(return_value=PostContextManager())
-
-        yield mock_session, mock_response
+        mock_context = AsyncMock()
+        mock_context.__aenter__.return_value = mock_response
+        mock_post.return_value = mock_context
+        yield mock_post, mock_response
 
 @pytest.mark.asyncio
 async def test_refresh_live_top_games_success(mock_bot, mock_db_connect):
@@ -164,11 +146,11 @@ async def test_igdb_sync_missing_creds(bg_cog):
     # If no exception is raised, and it exits cleanly, the missing cred check worked.
 
 @pytest.mark.asyncio
-@patch.dict(os.environ, {"TWITCH_CLIENT_ID": "test_id", "TWITCH_ACCESS_TOKEN": "test_token"})
+@patch.dict(os.environ, {"TWITCH_CLIENT_ID": "test_id", "TWITCH_SECRET": "test_token"})
 @patch('cogs.background_tasks.asyncio.sleep')  # Prevent tests from actually sleeping
-async def test_igdb_sync_success(mock_sleep, bg_cog, mock_db_connect, mock_aiohttp_session):
+async def test_igdb_sync_success(mock_sleep, bg_cog, mock_db_connect, mock_igdb_client):
     mock_db, mock_cursor = mock_db_connect
-    mock_session, mock_response = mock_aiohttp_session
+    mock_post, mock_response = mock_igdb_client
 
     # Mock current max ID
     mock_cursor.fetchone.return_value = (0,)
@@ -212,3 +194,12 @@ def test_cog_load_and_unload(bg_cog):
     bg_cog.cog_unload()
     bg_cog.update_igdb_catalog.cancel.assert_called_once()
     bg_cog.update_live_top_games_loop.cancel.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_igdb_sync_failure_keeps_scheduled_loop_alive(bg_cog):
+    """Exhausted retries are logged without escaping the weekly loop."""
+    from igdb_client import IGDBError
+    with patch.object(bg_cog, "_sync_igdb_catalog", new_callable=AsyncMock) as sync:
+        sync.side_effect = IGDBError("IGDB unavailable after bounded retries")
+        await bg_cog.update_igdb_catalog.coro(bg_cog)
+        sync.assert_awaited_once()

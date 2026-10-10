@@ -3,7 +3,13 @@ import aiosqlite
 from unittest.mock import AsyncMock, patch
 
 # Import functions to test from database.py
-from database import init_db, ensure_columns, auto_migrate_multiplayer_flags
+from database import (
+    init_db,
+    ensure_columns,
+    auto_migrate_multiplayer_flags,
+    claim_game_ping_cooldown,
+    get_guild_ping_role_ids,
+)
 
 # -----------------------------------------------------------------------------
 # 1. Tests for Schema Initialization & Tables
@@ -29,6 +35,8 @@ async def test_init_db_creates_all_tables(tmp_path, monkeypatch):
     assert "user_settings" in tables
     assert "user_guild_settings" in tables
     assert "guild_lfg_settings" in tables
+    assert "guild_game_ping_state" in tables
+    assert "guild_ping_roles" in tables
     assert "quickstart_messages" in tables
     assert "live_top_games" in tables
 
@@ -102,7 +110,7 @@ async def test_user_settings_migration(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 @patch("os.getenv")
-@patch("aiohttp.ClientSession.post")
+@patch("database.igdb.post")
 async def test_auto_migrate_multiplayer_flags_and_cleanup(mock_post, mock_getenv, tmp_path, monkeypatch):
     """Test IGDB multiplayer flag updating and pruning of single-player games."""
     test_db_path = tmp_path / "test_cleanup.sqlite"
@@ -111,7 +119,7 @@ async def test_auto_migrate_multiplayer_flags_and_cleanup(mock_post, mock_getenv
     # 1. Setup mock IGDB API credentials
     mock_getenv.side_effect = lambda key, default=None: {
         "TWITCH_CLIENT_ID": "fake_client_id",
-        "TWITCH_ACCESS_TOKEN": "fake_token",
+        "TWITCH_SECRET": "fake_token",
     }.get(key, default)
 
     # 2. Seed test database with unclassified games and subscription
@@ -158,7 +166,7 @@ async def test_auto_migrate_multiplayer_flags_and_cleanup(mock_post, mock_getenv
 
 @pytest.mark.asyncio
 @patch("os.getenv")
-@patch("aiohttp.ClientSession.post")
+@patch("database.igdb.post")
 async def test_init_db_repairs_orphan_subscriptions(mock_post, mock_getenv, tmp_path, monkeypatch):
     """Test that init_db detects orphan subscriptions and fetches missing game data from IGDB."""
     test_db_path = tmp_path / "test_orphan_repair.sqlite"
@@ -167,7 +175,7 @@ async def test_init_db_repairs_orphan_subscriptions(mock_post, mock_getenv, tmp_
     # Mock IGDB API credentials
     mock_getenv.side_effect = lambda key, default=None: {
         "TWITCH_CLIENT_ID": "fake_client_id",
-        "TWITCH_ACCESS_TOKEN": "fake_token",
+        "TWITCH_SECRET": "fake_token",
     }.get(key, default)
 
     # Pre-populate database with tables and an orphan subscription (game_id 999 has no entry in igdb_games)
@@ -233,10 +241,24 @@ async def test_init_db_creates_current_schema(tmp_path, monkeypatch):
         async with db.execute("PRAGMA table_info(live_top_games);") as cursor:
             live_columns = {row[1] for row in await cursor.fetchall()}
 
+        async with db.execute("PRAGMA table_info(guild_game_ping_state);") as cursor:
+            ping_state_columns = {row[1]: row[5] for row in await cursor.fetchall()}
+
+        async with db.execute("PRAGMA table_info(guild_ping_roles);") as cursor:
+            ping_role_columns = {row[1]: row[5] for row in await cursor.fetchall()}
+
     assert "total_rating_count" in igdb_columns
 
     assert "mode" in lfg_columns
     assert "whitelisted_channels" in lfg_columns
+    assert "game_ping_cooldown_seconds" in lfg_columns
+
+    assert ping_state_columns["guild_id"] == 1
+    assert ping_state_columns["game_id"] == 2
+    assert "last_ping_at" in ping_state_columns
+
+    assert ping_role_columns["guild_id"] == 1
+    assert ping_role_columns["role_id"] == 2
 
     assert {
         "message_id",
@@ -297,3 +319,180 @@ async def test_init_db_migrates_legacy_schema(tmp_path, monkeypatch):
     assert "mode" in lfg_columns
     assert "whitelisted_channels" in lfg_columns
     assert preserved_row == (12345,)
+
+# -----------------------------------------------------------------------------
+# 5. Tests for LFG Ping Anti-Spam State
+# -----------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_claim_game_ping_cooldown_blocks_until_expiry(tmp_path, monkeypatch):
+    test_db_path = tmp_path / "test_ping_cooldown.sqlite"
+    monkeypatch.setattr("database.DB_PATH", str(test_db_path))
+    await init_db()
+
+    async with aiosqlite.connect(test_db_path) as db:
+        await db.execute(
+            "INSERT INTO igdb_games (id, name, updated_at) VALUES (?, ?, ?)",
+            (1, "Portal 2", 1600000000)
+        )
+        await db.execute(
+            "INSERT INTO guild_lfg_settings (guild_id, game_ping_cooldown_seconds) VALUES (?, ?)",
+            (999, 600)
+        )
+        await db.commit()
+
+    allowed, retry_after = await claim_game_ping_cooldown(999, 1, now=1000)
+    assert allowed is True
+    assert retry_after == 0
+
+    allowed, retry_after = await claim_game_ping_cooldown(999, 1, now=1100)
+    assert allowed is False
+    assert retry_after == 500
+
+    allowed, retry_after = await claim_game_ping_cooldown(999, 1, now=1600)
+    assert allowed is True
+    assert retry_after == 0
+
+    async with aiosqlite.connect(test_db_path) as db:
+        async with db.execute(
+            "SELECT last_ping_at FROM guild_game_ping_state WHERE guild_id = ? AND game_id = ?",
+            (999, 1)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+    assert row == (1600,)
+
+
+@pytest.mark.asyncio
+async def test_claim_game_ping_cooldown_disabled_does_not_create_state(
+        tmp_path,
+        monkeypatch
+):
+    test_db_path = tmp_path / "test_ping_cooldown_disabled.sqlite"
+    monkeypatch.setattr("database.DB_PATH", str(test_db_path))
+
+    await init_db()
+
+    async with aiosqlite.connect(test_db_path) as db:
+        await db.execute(
+            "INSERT INTO igdb_games (id, name, updated_at) VALUES (?, ?, ?)",
+            (1, "Portal 2", 1600000000)
+        )
+
+        # Explicitly disable the per-game cooldown for this guild.
+        await db.execute(
+            """
+            INSERT INTO guild_lfg_settings (
+                guild_id,
+                game_ping_cooldown_seconds
+            )
+            VALUES (?, ?)
+            """,
+            (999, 0)
+        )
+
+        await db.commit()
+
+    assert await claim_game_ping_cooldown(
+        999,
+        1,
+        now=1000
+    ) == (True, 0)
+
+    assert await claim_game_ping_cooldown(
+        999,
+        1,
+        now=1001
+    ) == (True, 0)
+
+    # Disabled cooldown should not create any persistent cooldown state.
+    async with aiosqlite.connect(test_db_path) as db:
+        async with db.execute(
+                """
+                SELECT COUNT(*)
+                FROM guild_game_ping_state
+                WHERE guild_id = ?
+                  AND game_id = ?
+                """,
+                (999, 1)
+        ) as cursor:
+            count = (await cursor.fetchone())[0]
+
+    assert count == 0
+
+@pytest.mark.asyncio
+async def test_claim_game_ping_cooldown_unconfigured_uses_30_second_default(
+        tmp_path,
+        monkeypatch
+):
+    test_db_path = tmp_path / "test_ping_cooldown_default.sqlite"
+    monkeypatch.setattr("database.DB_PATH", str(test_db_path))
+
+    await init_db()
+
+    async with aiosqlite.connect(test_db_path) as db:
+        await db.execute(
+            "INSERT INTO igdb_games (id, name, updated_at) VALUES (?, ?, ?)",
+            (1, "Portal 2", 1600000000)
+        )
+        await db.commit()
+
+    # First ping succeeds.
+    assert await claim_game_ping_cooldown(
+        999,
+        1,
+        now=1000
+    ) == (True, 0)
+
+    # One second later, 29 seconds remain.
+    assert await claim_game_ping_cooldown(
+        999,
+        1,
+        now=1001
+    ) == (False, 29)
+
+    # At exactly 30 seconds, it is available again.
+    assert await claim_game_ping_cooldown(
+        999,
+        1,
+        now=1030
+    ) == (True, 0)
+
+@pytest.mark.asyncio
+async def test_get_guild_ping_role_ids(tmp_path, monkeypatch):
+    test_db_path = tmp_path / "test_ping_roles.sqlite"
+    monkeypatch.setattr("database.DB_PATH", str(test_db_path))
+    await init_db()
+
+    async with aiosqlite.connect(test_db_path) as db:
+        await db.executemany(
+            "INSERT INTO guild_ping_roles (guild_id, role_id) VALUES (?, ?)",
+            [(999, 30), (999, 10), (123, 20)]
+        )
+        await db.commit()
+
+    assert await get_guild_ping_role_ids(999) == [10, 30]
+
+
+@pytest.mark.asyncio
+@patch("database.igdb.post")
+async def test_backfill_failure_preserves_games_before_cleanup(mock_post, tmp_path, monkeypatch):
+    """An exhausted API request must not purge unclassified cached games."""
+    from igdb_client import IGDBError
+    path = str(tmp_path / "failed_backfill.sqlite")
+    monkeypatch.setattr("database.DB_PATH", path)
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "test_id")
+    monkeypatch.setenv("TWITCH_SECRET", "test_secret")
+    await init_db()
+    async with aiosqlite.connect(path) as db:
+        await db.execute(
+            "INSERT INTO igdb_games (id, name, updated_at) VALUES (?, ?, ?)",
+            (101, "Unclassified Game", 1),
+        )
+        await db.commit()
+    mock_post.side_effect = IGDBError("IGDB unavailable after bounded retries")
+    await auto_migrate_multiplayer_flags()
+    mock_post.assert_called_once()
+    async with aiosqlite.connect(path) as db:
+        async with db.execute("SELECT id FROM igdb_games") as cursor:
+            assert await cursor.fetchall() == [(101,)]

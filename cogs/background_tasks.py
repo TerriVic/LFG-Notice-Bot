@@ -3,7 +3,7 @@ import os
 import time
 import typing
 
-import aiohttp
+from igdb_client import igdb
 import aiosqlite
 import discord
 from discord.ext import commands, tasks
@@ -14,7 +14,6 @@ from utils import (
     GENERIC_DLC_PATTERN, format_interval,
     format_command_mention as fmt
 )
-
 
 async def refresh_live_top_games(
     bot: discord.Client,
@@ -111,7 +110,6 @@ async def refresh_live_top_games(
             await db.execute("UPDATE live_top_games SET last_updated = ? WHERE message_id = ?", (now, message_id))
             await db.commit()
 
-
 class BackgroundTasks(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -130,20 +128,17 @@ class BackgroundTasks(commands.Cog):
 
     @tasks.loop(hours=168)
     async def update_igdb_catalog(self):
+        try:
+            await self._sync_igdb_catalog()
+        except Exception as error:
+            print(f"[IGDB Sync] Sync failed: {type(error).__name__}: {error}")
+
+    async def _sync_igdb_catalog(self):
         print("[IGDB Sync] Starting catalog sync...")
 
-        client_id = os.getenv("TWITCH_CLIENT_ID")
-        access_token = os.getenv("TWITCH_ACCESS_TOKEN")
-
-        if not client_id or not access_token:
-            print("[IGDB Sync] Error: Missing TWITCH_CLIENT_ID or TWITCH_ACCESS_TOKEN.")
+        if not igdb.configured:
+            print("[IGDB Sync] Error: Missing TWITCH_CLIENT_ID or TWITCH_SECRET.")
             return
-
-        headers = {
-            "Client-ID": client_id,
-            "Authorization": f"Bearer {access_token}",
-            "Accept": "application/json"
-        }
 
         async with aiosqlite.connect(DB_PATH) as db_async:
             async with db_async.execute("SELECT MAX(id) FROM igdb_games") as async_cursor:
@@ -154,93 +149,87 @@ class BackgroundTasks(commands.Cog):
             total_upserted = 0
             page_count = 0
 
-            async with aiohttp.ClientSession() as session:
-                while True:
-                    body = (
-                        f"fields id, name, updated_at, first_release_date, category, version_parent, parent_game, game_modes, total_rating_count; "
-                        f"where id > {last_id} & version_parent = null & parent_game = null & game_modes = (2, 3, 4, 5, 6); "
-                        f"sort id asc; "
-                        f"limit {limit};"
-                    )
+            while True:
+                body = (
+                    f"fields id, name, updated_at, first_release_date, category, version_parent, parent_game, game_modes, total_rating_count; "
+                    f"where id > {last_id} & version_parent = null & parent_game = null & game_modes = (2, 3, 4, 5, 6); "
+                    f"sort id asc; "
+                    f"limit {limit};"
+                )
 
-                    async with session.post(
-                            "https://api.igdb.com/v4/games",
-                            headers=headers,
-                            data=body
-                    ) as response:
-                        if response.status == 429:
-                            print("[IGDB Sync] Rate limited. Waiting 2 seconds...")
-                            await asyncio.sleep(2.0)
+                async with igdb.post(
+                        "https://api.igdb.com/v4/games",
+
+                        data=body
+                ) as response:
+                    if response.status != 200:
+                        print(f"[IGDB Sync] API Error {response.status}")
+                        return
+
+                    games = await response.json()
+
+                if not isinstance(games, list) or len(games) == 0:
+                    break
+
+                last_id = games[-1]["id"]
+                page_count += 1
+
+                valid_categories = {0, 8, 9, 10, 11}
+                filtered_games = []
+
+                for g in games:
+                    cat = g.get("category")
+                    p_game = extract_id(g.get("parent_game"))
+                    v_parent = extract_id(g.get("version_parent"))
+                    g_name = g.get("name", "")
+
+                    if (cat in valid_categories or cat is None) and p_game is None and v_parent is None:
+                        if GENERIC_DLC_PATTERN.search(g_name):
                             continue
-                        elif response.status != 200:
-                            err_text = await response.text()
-                            print(f"[IGDB Sync] API Error {response.status}: {err_text}")
-                            break
+                        filtered_games.append((g, p_game, v_parent))
 
-                        games = await response.json()
-
-                    if not isinstance(games, list) or len(games) == 0:
-                        break
-
-                    last_id = games[-1]["id"]
-                    page_count += 1
-
-                    valid_categories = {0, 8, 9, 10, 11}
-                    filtered_games = []
-
-                    for g in games:
-                        cat = g.get("category")
-                        p_game = extract_id(g.get("parent_game"))
-                        v_parent = extract_id(g.get("version_parent"))
-                        g_name = g.get("name", "")
-
-                        if (cat in valid_categories or cat is None) and p_game is None and v_parent is None:
-                            if GENERIC_DLC_PATTERN.search(g_name):
-                                continue
-                            filtered_games.append((g, p_game, v_parent))
-
-                    if not filtered_games:
-                        await asyncio.sleep(0.3)
-                        continue
-
-                    records = []
-                    for g, p_game, v_parent in filtered_games:
-                        records.append((
-                            g["id"],
-                            g["name"],
-                            g.get("updated_at", int(time.time())),
-                            g.get("first_release_date"),
-                            g.get("category", 0),
-                            p_game,
-                            v_parent,
-                            1,
-                            g.get("total_rating_count", 0)
-                        ))
-
-                    await db_async.executemany(
-                        """
-                        INSERT INTO igdb_games (id, name, updated_at, first_release_date, category, parent_game_id, version_parent_id, is_multiplayer, total_rating_count)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            ON CONFLICT(id) DO UPDATE SET
-                            name = excluded.name,
-                            updated_at = excluded.updated_at,
-                            first_release_date = excluded.first_release_date,
-                            category = excluded.category,
-                            parent_game_id = excluded.parent_game_id,
-                            version_parent_id = excluded.version_parent_id,
-                            is_multiplayer = excluded.is_multiplayer,
-                            total_rating_count = excluded.total_rating_count
-                        """,
-                        records
-                    )
-                    await db_async.commit()
-
-                    total_upserted += len(records)
-
-                    if page_count % 5 == 0:
-                        print(f"[IGDB Sync] Batch {page_count}: Upserted {len(records)} games (Total added/updated: {total_upserted}). Last ID: {last_id}")
-
+                if not filtered_games:
                     await asyncio.sleep(0.3)
+                    continue
+
+                records = []
+                for g, p_game, v_parent in filtered_games:
+                    records.append((
+                        g["id"],
+                        g["name"],
+                        g.get("updated_at", int(time.time())),
+                        g.get("first_release_date"),
+                        g.get("category", 0),
+                        p_game,
+                        v_parent,
+                        1,
+                        g.get("total_rating_count", 0)
+                    ))
+
+                await db_async.executemany(
+                    """
+                    INSERT INTO igdb_games (id, name, updated_at, first_release_date, category, parent_game_id, version_parent_id, is_multiplayer, total_rating_count)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
+                        updated_at = excluded.updated_at,
+                        first_release_date = excluded.first_release_date,
+                        category = excluded.category,
+                        parent_game_id = excluded.parent_game_id,
+                        version_parent_id = excluded.version_parent_id,
+                        is_multiplayer = excluded.is_multiplayer,
+                        total_rating_count = excluded.total_rating_count
+                    """,
+                    records
+                )
+                await db_async.commit()
+
+                total_upserted += len(records)
+
+                if page_count % 5 == 0:
+                    print(f"[IGDB Sync] Batch {page_count}: Upserted {len(records)} games (Total added/updated: {total_upserted}). Last ID: {last_id}")
+
+                await asyncio.sleep(0.3)
 
             print(f"[IGDB Sync] Finished catalog sync. Added/Updated {total_upserted} games across {page_count} batches.")
 
@@ -251,7 +240,6 @@ class BackgroundTasks(commands.Cog):
     @tasks.loop(minutes=1)
     async def update_live_top_games_loop(self):
         await refresh_live_top_games(self.bot, force=False)
-
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(BackgroundTasks(bot))

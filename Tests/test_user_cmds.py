@@ -1,9 +1,10 @@
 import pytest
+import re
 import aiosqlite
 import discord
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from cogs.user_cmds import UserCommands, autocomplete_user_subscriptions
+from cogs.user_cmds import UserCommands, autocomplete_user_subscriptions, can_user_ping_game, split_ping_message
 from database import init_db
 
 # -----------------------------------------------------------------------------
@@ -248,6 +249,97 @@ async def test_unsubscribe_game_not_found(setup_test_db):
 # -----------------------------------------------------------------------------
 
 @pytest.mark.asyncio
+async def test_ping_game_rejects_dm_context(setup_test_db):
+    cog = UserCommands(bot=MagicMock())
+    interaction = make_mock_interaction(user_id=101, guild_id=None, channel_id=None)
+
+    await cog.ping_game.callback(cog, interaction, game="Portal 2")
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "This command can only be used inside a server.",
+        ephemeral=True
+    )
+    interaction.response.defer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_can_user_ping_game_requires_configured_role(setup_test_db):
+    interaction = make_mock_interaction(user_id=101, guild_id=999, channel_id=888)
+    interaction.user.guild_permissions = MagicMock(administrator=False, manage_messages=False)
+    interaction.user.roles = []
+
+    allowed_role = MagicMock()
+    allowed_role.id = 777
+    interaction.guild.get_role = lambda role_id: allowed_role if role_id == 777 else None
+
+    async with aiosqlite.connect(setup_test_db) as db:
+        await db.execute(
+            "INSERT INTO guild_ping_roles (guild_id, role_id) VALUES (?, ?)",
+            (999, 777)
+        )
+        await db.commit()
+
+    with patch("cogs.user_cmds.get_bot_owner_id", return_value=0):
+        allowed, role_ids = await can_user_ping_game(interaction)
+
+    assert allowed is False
+    assert role_ids == [777]
+
+    member_role = MagicMock()
+    member_role.id = 777
+    interaction.user.roles = [member_role]
+
+    with patch("cogs.user_cmds.get_bot_owner_id", return_value=0):
+        allowed, role_ids = await can_user_ping_game(interaction)
+
+    assert allowed is True
+    assert role_ids == [777]
+
+
+@pytest.mark.asyncio
+async def test_ping_game_rejects_user_without_allowed_role(setup_test_db):
+    cog = UserCommands(bot=MagicMock())
+    interaction = make_mock_interaction(user_id=101, guild_id=999, channel_id=888)
+
+    with patch("cogs.user_cmds.is_lfg_allowed_in_channel", new=AsyncMock(return_value=True)), \
+            patch("cogs.user_cmds.can_user_ping_game", new=AsyncMock(return_value=(False, [777]))):
+        await cog.ping_game.callback(cog, interaction, game="Portal 2")
+
+    interaction.response.defer.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
+    msg = interaction.response.send_message.await_args.args[0]
+    assert "allowed LFG ping roles" in msg
+    assert "<@&777>" in msg
+
+
+@pytest.mark.asyncio
+async def test_ping_game_blocked_by_server_game_cooldown(setup_test_db):
+    cog = UserCommands(bot=MagicMock())
+    interaction = make_mock_interaction(user_id=101, guild_id=999, channel_id=888)
+
+    subscriber = MagicMock()
+    subscriber.id = 202
+    interaction.guild.get_member = lambda uid: subscriber if uid == 202 else MagicMock(id=uid)
+
+    async with aiosqlite.connect(setup_test_db) as db:
+        await db.execute("INSERT INTO subscriptions (user_id, game_id) VALUES (?, ?)", (202, 1))
+        await db.commit()
+
+    with patch("cogs.user_cmds.is_lfg_allowed_in_channel", new=AsyncMock(return_value=True)), \
+            patch("cogs.user_cmds.can_user_ping_game", new=AsyncMock(return_value=(True, []))), \
+            patch("cogs.user_cmds.resolve_to_base_game", new=AsyncMock(return_value=(1, "Portal 2"))), \
+            patch("cogs.user_cmds.claim_game_ping_cooldown", new=AsyncMock(return_value=(False, 300))):
+        await cog.ping_game.callback(cog, interaction, game="Portal 2")
+
+    interaction.response.defer.assert_awaited_once()
+    interaction.followup.send.assert_awaited_once()
+    msg = interaction.followup.send.await_args.args[0]
+    assert "Portal 2" in msg
+    assert "pinged recently" in msg
+    assert "<t:" in msg
+
+
+@pytest.mark.asyncio
 async def test_ping_game_disallowed_channel(setup_test_db):
     """Test ping_game when executed in a channel where LFG is disallowed."""
     cog = UserCommands(bot=MagicMock())
@@ -258,7 +350,8 @@ async def test_ping_game_disallowed_channel(setup_test_db):
 
     interaction.response.send_message.assert_called_once()
     msg = interaction.response.send_message.call_args[0][0]
-    assert "LFG pings are not allowed in this channel" in msg
+    assert "LFG pings are not enabled in this channel" in msg
+    assert "/config setup_bot" in msg
 
 
 @pytest.mark.asyncio
@@ -1072,3 +1165,92 @@ async def test_reset_subscribed_indicator(setup_test_db):
 
     assert row is not None
     assert row[0] == "⭐"
+
+@pytest.mark.parametrize("message", [
+    "short ping <@123>",
+    "x" * 2000,
+    "x" * 2001,
+    "x" * 1995 + "<@123456789012345678>",
+    "long note " + "x" * 10000,
+    " ".join(f"<@{100000000000000000 + i}>" for i in range(1500)),
+    ], ids=[
+    "short",
+    "exact-limit",
+    "overflow",
+    "mention-at-boundary",
+    "long-note",
+    "1500-subscribers",
+])
+def test_split_ping_message_preserves_content_and_mentions(message):
+    batches = split_ping_message(message)
+    prefix = "**LFG ping continued:**\n"
+    assert all(0 < len(batch) <= 2000 for batch in batches)
+    assert all(batch.startswith(prefix) for batch in batches[1:])
+    assert batches[0] + "".join(batch[len(prefix):] for batch in batches[1:]) == message
+    assert re.findall(r"<@!?\d+>", message) == [
+        mention for batch in batches for mention in re.findall(r"<@!?\d+>", batch)
+    ]
+    assert all(len(set(re.findall(r"<@!?(\d+)>", batch))) <= 100 for batch in batches)
+    if len(message) <= 2000:
+        assert batches == [message]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partial_failure", [False, True], ids=["complete", "partial-failure"])
+async def test_ping_game_many_batches_preserves_quiet_mode_and_notifies_once(monkeypatch, partial_failure):
+    from operations import OperationalStats
+    counters = OperationalStats()
+    monkeypatch.setattr("cogs.user_cmds.stats", counters)
+    cog = UserCommands(bot=MagicMock())
+    interaction = make_mock_interaction(user_id=101)
+    if partial_failure:
+        interaction.followup.send.side_effect = [None, RuntimeError("send failed")]
+    ids = list(range(100000000000000000, 100000000000000400))
+    rows = [(uid, i % 2) for i, uid in enumerate(ids)]
+    # Duplicate placeholders exercise repeated subscriber mentions across batches.
+    template = "{caller} {game}: {mentions}\n{mentions}\n{note}"
+    cursor_game = MagicMock()
+    cursor_game.fetchone = AsyncMock(return_value=(1, "Portal 2"))
+    cursor_rows = MagicMock()
+    cursor_rows.fetchall = AsyncMock(return_value=rows)
+    cursor_template = MagicMock()
+    cursor_template.fetchone = AsyncMock(return_value=(template,))
+    contexts = []
+    for cursor in (cursor_game, cursor_rows, cursor_template):
+        context = AsyncMock()
+        context.__aenter__.return_value = cursor
+        contexts.append(context)
+    db = MagicMock()
+    db.execute.side_effect = contexts
+    connection = AsyncMock()
+    connection.__aenter__.return_value = db
+    with patch("cogs.user_cmds.aiosqlite.connect", return_value=connection), \
+            patch("cogs.user_cmds.is_lfg_allowed_in_channel", new=AsyncMock(return_value=True)), \
+            patch("cogs.user_cmds.can_user_ping_game", new=AsyncMock(return_value=(True, []))), \
+            patch("cogs.user_cmds.resolve_to_base_game", new=AsyncMock(return_value=(1, "Portal 2"))), \
+            patch("cogs.user_cmds.claim_game_ping_cooldown", new=AsyncMock(return_value=(True, 0))):
+        if partial_failure:
+            with pytest.raises(RuntimeError, match="send failed"):
+                await cog.ping_game.callback(cog, interaction, game="Portal 2", note="Let's play!")
+            assert counters.counters["pings_sent"] == 0
+            return
+        await cog.ping_game.callback(cog, interaction, game="Portal 2", note="Let's play!")
+    assert counters.counters["pings_sent"] == 1
+    calls = interaction.followup.send.call_args_list
+    assert len(calls) > 2
+    notified = []
+    for i, call in enumerate(calls):
+        message = call.args[0]
+        assert len(message) <= 2000
+        if i:
+            assert message.startswith("**LFG ping continued:**\n")
+        allowed = call.kwargs["allowed_mentions"]
+        assert allowed.roles is False and allowed.everyone is False
+        batch_ids = [user.id for user in (allowed.users or [])]
+        assert len(batch_ids) <= 100
+        assert all(f"<@{uid}>" in message for uid in batch_ids)
+        notified.extend(batch_ids)
+    assert sorted(notified) == ids[::2]
+    text = "".join(call.args[0] for call in calls)
+    assert all(f"<@{uid}>" in text for uid in ids)
+    assert "Let's play!" in text

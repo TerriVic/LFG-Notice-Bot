@@ -849,7 +849,7 @@ async def test_view_lfg_channels_unconfigured_default(admin_cog, mock_interactio
 
     mock_interaction.response.defer.assert_awaited_once_with(ephemeral=True)
     mock_interaction.followup.send.assert_awaited_once_with(
-        "⚙️ LFG channel settings are currently set to **default (Allow All Channels)**.", ephemeral=True
+        "⚙️ LFG channel settings are currently set to **default (Pings disabled — run /config setup_bot)**.", ephemeral=True
     )
 
 
@@ -1051,3 +1051,137 @@ async def test_force_update_top_games_success(admin_cog, mock_interaction, mock_
 
         mock_interaction.followup.send.assert_awaited_once()
         assert "Live top games tracker refreshed successfully!" in mock_interaction.followup.send.call_args[0][0]
+
+# -----------------------------------------------------------------------------
+# Ping Anti-Spam Configuration Tests
+# -----------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_ping_cooldown_sets_minutes_as_seconds(admin_cog, mock_interaction, mock_db_connect):
+    mock_db, _ = mock_db_connect
+
+    await admin_cog.ping_cooldown.callback(admin_cog, mock_interaction, minutes=10.0)
+
+    matching_calls = [
+        call for call in mock_db.execute.call_args_list
+        if "game_ping_cooldown_seconds" in call.args[0] and "INSERT INTO guild_lfg_settings" in call.args[0]
+    ]
+    assert matching_calls
+    assert matching_calls[-1].args[1] == (67890, 600)
+    assert "10 minutes" in mock_interaction.followup.send.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_ping_cooldown_accepts_half_minute(admin_cog, mock_interaction, mock_db_connect):
+    mock_db, _ = mock_db_connect
+
+    await admin_cog.ping_cooldown.callback(admin_cog, mock_interaction, minutes=0.5)
+
+    matching_calls = [
+        call for call in mock_db.execute.call_args_list
+        if "game_ping_cooldown_seconds" in call.args[0] and "INSERT INTO guild_lfg_settings" in call.args[0]
+    ]
+    assert matching_calls
+    assert matching_calls[-1].args[1] == (67890, 30)
+
+    message = mock_interaction.followup.send.await_args.args[0]
+    assert "0.5 minutes" in message
+    assert "30 seconds" in message
+
+
+@pytest.mark.asyncio
+async def test_ping_cooldown_disable_clears_state(admin_cog, mock_interaction, mock_db_connect):
+    mock_db, _ = mock_db_connect
+
+    await admin_cog.ping_cooldown.callback(admin_cog, mock_interaction, minutes=0)
+
+    assert any(
+        "DELETE FROM guild_game_ping_state" in call.args[0]
+        and call.args[1] == (67890,)
+        for call in mock_db.execute.call_args_list
+    )
+    assert "disabled" in mock_interaction.followup.send.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_ping_cooldown_view_unconfigured_explains_default(
+        admin_cog,
+        mock_interaction,
+        mock_db_connect
+):
+    _, mock_cursor = mock_db_connect
+    mock_cursor.fetchone.return_value = None
+
+    await admin_cog.ping_cooldown.callback(
+        admin_cog,
+        mock_interaction,
+        minutes=None
+    )
+
+    message = mock_interaction.followup.send.await_args.args[0]
+
+    assert "Default: 30 seconds (0.5 minutes)." in message
+    assert "**0.5 minutes**" in message
+    assert "**30 seconds**" in message
+
+@pytest.mark.asyncio
+async def test_ping_roles_view_unconfigured_explains_default(admin_cog, mock_interaction, mock_db_connect):
+    _, mock_cursor = mock_db_connect
+    mock_cursor.fetchall.return_value = []
+    action = app_commands.Choice(name="View Allowed Roles", value="view")
+
+    await admin_cog.ping_roles.callback(
+        admin_cog,
+        mock_interaction,
+        action=action,
+        role=None
+    )
+
+    message = mock_interaction.followup.send.await_args.args[0]
+    assert "Everyone may use `/ping_game`" in message
+    assert "Default: everyone may ping" in message
+
+
+@pytest.mark.asyncio
+async def test_ping_roles_allow_everyone_clears_restrictions(admin_cog, mock_interaction, mock_db_connect):
+    mock_db, _ = mock_db_connect
+    action = app_commands.Choice(name="Allow Everyone", value="allow_all")
+
+    await admin_cog.ping_roles.callback(
+        admin_cog,
+        mock_interaction,
+        action=action,
+        role=None
+    )
+
+    assert any(
+        "DELETE FROM guild_ping_roles" in call.args[0]
+        and call.args[1] == (67890,)
+        for call in mock_db.execute.call_args_list
+    )
+    assert "Everyone may use `/ping_game`" in mock_interaction.followup.send.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_ping_roles_add_role(admin_cog, mock_interaction, mock_db_connect):
+    mock_db, mock_cursor = mock_db_connect
+    mock_cursor.rowcount = 1
+
+    action = app_commands.Choice(name="Add Allowed Role", value="add")
+    role = MagicMock(spec=discord.Role)
+    role.id = 444
+    role.mention = "<@&444>"
+
+    await admin_cog.ping_roles.callback(
+        admin_cog,
+        mock_interaction,
+        action=action,
+        role=role
+    )
+
+    assert any(
+        "INSERT OR IGNORE INTO guild_ping_roles" in call.args[0]
+        and call.args[1] == (67890, 444)
+        for call in mock_db.execute.call_args_list
+    )
+    assert "<@&444>" in mock_interaction.followup.send.await_args.args[0]

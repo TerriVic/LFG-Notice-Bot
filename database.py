@@ -2,7 +2,7 @@ import asyncio
 import os
 import time
 
-import aiohttp
+from igdb_client import igdb
 import aiosqlite
 
 # Setup persistent data path
@@ -20,7 +20,6 @@ async def ensure_columns(db: aiosqlite.Connection, table_name: str, expected_col
     for col_name, col_type in expected_columns.items():
         if col_name not in existing_columns:
             await db.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type};")
-
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -57,12 +56,33 @@ async def init_db():
         await db.execute("""
                          CREATE TABLE IF NOT EXISTS guild_lfg_settings (
                                                                            guild_id INTEGER PRIMARY KEY,
-                                                                           mode TEXT NOT NULL DEFAULT 'all',
-                                                                           whitelisted_channels TEXT NOT NULL DEFAULT ''
+                                                                           mode TEXT NOT NULL DEFAULT 'none',
+                                                                           whitelisted_channels TEXT NOT NULL DEFAULT '',
+                                                                           game_ping_cooldown_seconds INTEGER NOT NULL DEFAULT 30
                          );
                          """)
 
-        # 4. Quickstart messages table
+        # 4. Per-Guild / Per-Game Ping Cooldown State
+        await db.execute("""
+                         CREATE TABLE IF NOT EXISTS guild_game_ping_state (
+                                                                             guild_id INTEGER NOT NULL,
+                                                                             game_id INTEGER NOT NULL,
+                                                                             last_ping_at INTEGER NOT NULL DEFAULT 0,
+                                                                             PRIMARY KEY (guild_id, game_id),
+                                                                             FOREIGN KEY (game_id) REFERENCES igdb_games (id) ON DELETE CASCADE
+                         );
+                         """)
+
+        # 5. Roles Allowed to Use LFG Pings
+        await db.execute("""
+                         CREATE TABLE IF NOT EXISTS guild_ping_roles (
+                                                                        guild_id INTEGER NOT NULL,
+                                                                        role_id INTEGER NOT NULL,
+                                                                        PRIMARY KEY (guild_id, role_id)
+                         );
+                         """)
+
+        # 6. Quickstart Messages Table
         # Quickstart Messages Table
         await db.execute("""
                          CREATE TABLE IF NOT EXISTS quickstart_messages (
@@ -73,7 +93,7 @@ async def init_db():
                          );
                          """)
 
-        # 5. Live Top Games Messages Table
+        # 7. Live Top Games Messages Table
         await db.execute("""
                  CREATE TABLE IF NOT EXISTS live_top_games (
                                                                message_id INTEGER PRIMARY KEY,
@@ -154,8 +174,9 @@ async def init_db():
         })
 
         await ensure_columns(db, "guild_lfg_settings", {
-            "mode": "TEXT NOT NULL DEFAULT 'all'",
-            "whitelisted_channels": "TEXT NOT NULL DEFAULT ''"
+            "mode": "TEXT NOT NULL DEFAULT 'none'",
+            "whitelisted_channels": "TEXT NOT NULL DEFAULT ''",
+            "game_ping_cooldown_seconds": "INTEGER NOT NULL DEFAULT 30"
         })
 
         await ensure_columns(db, "live_top_games", {
@@ -177,6 +198,15 @@ async def init_db():
             "idx_live_top_games_guild ON live_top_games(guild_id);"
         )
 
+        # Existing primary keys cover user-first and guild-first lookups.
+        for index_name, table_name, columns in (
+            ("idx_subscriptions_game", "subscriptions", "game_id"),
+            ("idx_user_guild_settings_guild", "user_guild_settings", "guild_id"),
+            ("idx_user_settings_guild", "user_settings", "guild_id"),
+            ("idx_quickstart_messages_guild", "quickstart_messages", "guild_id"),
+        ):
+            await db.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name}({columns})")
+
         await db.commit()
 
         # ---------------------------------------------------------------------
@@ -190,14 +220,7 @@ async def init_db():
                               """) as cursor:
             missing_ids = [row[0] for row in await cursor.fetchall()]
 
-        client_id = os.getenv("TWITCH_CLIENT_ID")
-        access_token = os.getenv("TWITCH_ACCESS_TOKEN")
-
-        if missing_ids and client_id and access_token:
-            headers = {
-                "Client-ID": client_id,
-                "Authorization": f"Bearer {access_token}"
-            }
+        if missing_ids and igdb.configured:
             chunk_size = 500
             for i in range(0, len(missing_ids), chunk_size):
                 chunk = missing_ids[i:i + chunk_size]
@@ -205,39 +228,105 @@ async def init_db():
                 body = f"fields id, name, category, first_release_date; where id = ({ids_str}); limit {chunk_size};"
 
                 try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
-                            if resp.status == 200:
-                                games = await resp.json()
-                                updates = [
-                                    (
-                                        g["id"],
-                                        g["name"],
-                                        int(time.time()),
-                                        g.get("first_release_date"),
-                                        g.get("category", 0)
-                                    )
-                                    for g in games
-                                ]
-                                await db.executemany(
-                                    """
-                                    INSERT OR IGNORE INTO igdb_games (id, name, updated_at, first_release_date, category)
-                                    VALUES (?, ?, ?, ?, ?)
-                                    """,
-                                    updates
+                    async with igdb.post("https://api.igdb.com/v4/games", data=body) as resp:
+                        if resp.status == 200:
+                            games = await resp.json()
+                            updates = [
+                                (
+                                    g["id"],
+                                    g["name"],
+                                    int(time.time()),
+                                    g.get("first_release_date"),
+                                    g.get("category", 0)
                                 )
-                                await db.commit()
+                                for g in games
+                            ]
+                            await db.executemany(
+                                """
+                                INSERT OR IGNORE INTO igdb_games (id, name, updated_at, first_release_date, category)
+                                VALUES (?, ?, ?, ?, ?)
+                                """,
+                                updates
+                            )
+                            await db.commit()
                 except Exception as e:
                     print(f"[DB Setup] Failed to repair orphan subscription: {e}")
 
     print("[DB Setup] Schema checked and migrated safely.")
 
+async def get_guild_ping_role_ids(guild_id: int) -> list[int]:
+    """Return configured role IDs allowed to call /ping_game in a guild."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+                "SELECT role_id FROM guild_ping_roles WHERE guild_id = ? ORDER BY role_id",
+                (guild_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+    return [row[0] for row in rows]
+
+async def claim_game_ping_cooldown(
+        guild_id: int,
+        game_id: int,
+        now: int | None = None
+) -> tuple[bool, int]:
+    """
+    Atomically claim the per-guild/per-game ping cooldown slot.
+
+    Returns (allowed, retry_after_seconds). When the configured cooldown is 0
+    or absent, the claim is always allowed and no state row is written.
+    """
+    current_time = int(time.time()) if now is None else int(now)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Serialize competing writers so two simultaneous users cannot both pass
+        # the read-before-write cooldown check.
+        await db.execute("BEGIN IMMEDIATE")
+
+        try:
+            async with db.execute(
+                    "SELECT game_ping_cooldown_seconds FROM guild_lfg_settings WHERE guild_id = ?",
+                    (guild_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            cooldown_seconds = max(0, int(row[0])) if row and row[0] is not None else 30
+
+            if cooldown_seconds == 0:
+                await db.commit()
+                return True, 0
+
+            async with db.execute(
+                    "SELECT last_ping_at FROM guild_game_ping_state WHERE guild_id = ? AND game_id = ?",
+                    (guild_id, game_id)
+            ) as cursor:
+                state_row = await cursor.fetchone()
+
+            if state_row:
+                elapsed = max(0, current_time - int(state_row[0]))
+                if elapsed < cooldown_seconds:
+                    await db.commit()
+                    return False, cooldown_seconds - elapsed
+
+            await db.execute(
+                """
+                INSERT INTO guild_game_ping_state (guild_id, game_id, last_ping_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(guild_id, game_id) DO UPDATE SET
+                    last_ping_at = excluded.last_ping_at
+                """,
+                (guild_id, game_id, current_time)
+            )
+            await db.commit()
+            return True, 0
+
+        except Exception:
+            await db.rollback()
+            raise
 
 async def auto_migrate_multiplayer_flags():
-    client_id = os.getenv("TWITCH_CLIENT_ID")
-    access_token = os.getenv("TWITCH_ACCESS_TOKEN")
 
-    if not client_id or not access_token:
+    if not igdb.configured:
         print("[Auto-Migration] Missing IGDB API credentials. Skipping backfill.")
         return
 
@@ -251,70 +340,62 @@ async def auto_migrate_multiplayer_flags():
     if total_to_fix > 0:
         print(f"[Auto-Migration] Found {total_to_fix} unclassified games. Starting background backfill...")
 
-        headers = {
-            "Client-ID": client_id,
-            "Authorization": f"Bearer {access_token}"
-        }
-
         chunk_size = 500
         updated_mp = 0
 
         # Valid multiplayer IGDB game mode IDs: 2 (Multiplayer), 3 (Co-op), 4 (Split screen), 5 (MMO), 6 (Battle Royale)
         multiplayer_mode_ids = {2, 3, 4, 5, 6}
 
-        async with aiohttp.ClientSession() as session:
-            for i in range(0, total_to_fix, chunk_size):
-                chunk = unclassified_ids[i:i + chunk_size]
-                ids_str = ",".join(str(gid) for gid in chunk)
-                body = f"fields id, game_modes; where id = ({ids_str}); limit {chunk_size};"
+        for i in range(0, total_to_fix, chunk_size):
+            chunk = unclassified_ids[i:i + chunk_size]
+            ids_str = ",".join(str(gid) for gid in chunk)
+            body = f"fields id, game_modes; where id = ({ids_str}); limit {chunk_size};"
 
-                try:
-                    async with session.post("https://api.igdb.com/v4/games", headers=headers, data=body) as resp:
-                        if resp.status == 200:
-                            results = await resp.json()
-                            updates = []
+            try:
+                async with igdb.post("https://api.igdb.com/v4/games", data=body) as resp:
+                    if resp.status == 200:
+                        results = await resp.json()
+                        updates = []
 
-                            for game in results:
-                                gid = game["id"]
-                                raw_modes = game.get("game_modes") or []
+                        for game in results:
+                            gid = game["id"]
+                            raw_modes = game.get("game_modes") or []
 
-                                # Safely extract mode IDs whether IGDB returns ints or dicts
-                                mode_ids = set()
-                                for m in raw_modes:
-                                    if isinstance(m, dict):
-                                        mode_ids.add(m.get("id"))
-                                    elif isinstance(m, int):
-                                        mode_ids.add(m)
+                            # Safely extract mode IDs whether IGDB returns ints or dicts
+                            mode_ids = set()
+                            for m in raw_modes:
+                                if isinstance(m, dict):
+                                    mode_ids.add(m.get("id"))
+                                elif isinstance(m, int):
+                                    mode_ids.add(m)
 
-                                # Check if any multiplayer mode ID exists in the game's modes
-                                if mode_ids.intersection(multiplayer_mode_ids):
-                                    updated_mp += 1
-                                    updates.append((1, gid))
+                            # Check if any multiplayer mode ID exists in the game's modes
+                            if mode_ids.intersection(multiplayer_mode_ids):
+                                updated_mp += 1
+                                updates.append((1, gid))
 
-                            if updates:
-                                async with aiosqlite.connect(DB_PATH) as db:
-                                    await db.executemany(
-                                        "UPDATE igdb_games SET is_multiplayer = ? WHERE id = ?",
-                                        updates
-                                    )
-                                    await db.commit()
+                        if updates:
+                            async with aiosqlite.connect(DB_PATH) as db:
+                                await db.executemany(
+                                    "UPDATE igdb_games SET is_multiplayer = ? WHERE id = ?",
+                                    updates
+                                )
+                                await db.commit()
 
-                        elif resp.status == 429:
-                            print("[Auto-Migration] Rate limited. Waiting 2s...")
-                            await asyncio.sleep(2.0)
-                            continue
-                        else:
-                            print(f"[Auto-Migration] API error {resp.status}: {await resp.text()}")
+                    else:
+                        print(f"[Auto-Migration] API error {resp.status}; aborting backfill before cleanup.")
+                        return
 
-                except Exception as e:
-                    print(f"[Auto-Migration] Batch error: {e}")
+            except Exception as e:
+                print(f"[Auto-Migration] Batch error: {e}; skipping cleanup.")
+                return
 
-                if (i // chunk_size) % 10 == 0:
-                    print(f"[Auto-Migration] Progress: {i}/{total_to_fix} games processed ({updated_mp} multiplayer found)...")
+            if (i // chunk_size) % 10 == 0:
+                print(f"[Auto-Migration] Progress: {i}/{total_to_fix} games processed ({updated_mp} multiplayer found)...")
 
-                await asyncio.sleep(0.25)
+            await asyncio.sleep(0.25)
 
-            print(f"[Auto-Migration] Completed backfill! Flagged {updated_mp} games as multiplayer.")
+        print(f"[Auto-Migration] Completed backfill! Flagged {updated_mp} games as multiplayer.")
     else:
         print("[Auto-Migration] All database entries are already classified.")
 
@@ -341,3 +422,14 @@ async def auto_migrate_multiplayer_flags():
             await db.execute("VACUUM")
 
     print(f"[Auto-Migration] Successfully pruned {deleted_count} unassigned single-player games from local database.")
+
+async def delete_guild_data(guild_id: int):
+    """Atomically remove server-specific records; retain global user profiles."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        for table in (
+            "guild_lfg_settings", "guild_game_ping_state", "guild_ping_roles",
+            "quickstart_messages", "live_top_games", "user_guild_settings",
+            "user_settings",
+        ):
+            await db.execute(f"DELETE FROM {table} WHERE guild_id = ?", (guild_id,))
+        await db.commit()

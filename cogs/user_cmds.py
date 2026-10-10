@@ -1,12 +1,17 @@
 import datetime
 import os
+import re
+import time
 
 import aiosqlite
+from operations import stats
+import os
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from database import DB_PATH
+from database import DB_PATH, claim_game_ping_cooldown, get_guild_ping_role_ids
 from utils import (
     resolve_to_base_game,
     autocomplete_games,
@@ -14,6 +19,7 @@ from utils import (
     fetch_game_details_from_igdb,
     GenericConfirmationView,
     is_lfg_allowed_in_channel,
+    get_bot_owner_id,
     GameInfoSubscribeView,
     format_command_mention as fmt, build_quickstart_embed
 )
@@ -51,6 +57,78 @@ async def autocomplete_user_subscriptions(interaction: discord.Interaction, curr
         )
         for row in rows
     ]
+
+async def can_user_ping_game(interaction: discord.Interaction) -> tuple[bool, list[int]]:
+    """Check server ping-role restrictions, with owner/moderator bypass."""
+    if not interaction.guild:
+        return False, []
+
+    if interaction.user.id == get_bot_owner_id():
+        return True, []
+
+    guild_permissions = getattr(interaction.user, "guild_permissions", None)
+    if guild_permissions and (guild_permissions.administrator or guild_permissions.manage_messages):
+        return True, []
+
+    configured_role_ids = await get_guild_ping_role_ids(interaction.guild.id)
+    if not configured_role_ids:
+        return True, []
+
+    valid_role_ids = []
+    stale_role_ids = []
+    for role_id in configured_role_ids:
+        if interaction.guild.get_role(role_id):
+            valid_role_ids.append(role_id)
+        else:
+            stale_role_ids.append(role_id)
+
+    # Deleted roles should not leave a server accidentally locked down forever.
+    if stale_role_ids:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.executemany(
+                "DELETE FROM guild_ping_roles WHERE guild_id = ? AND role_id = ?",
+                [(interaction.guild.id, role_id) for role_id in stale_role_ids]
+            )
+            await db.commit()
+
+    if not valid_role_ids:
+        return True, []
+
+    member_role_ids = {role.id for role in getattr(interaction.user, "roles", [])}
+    return bool(member_role_ids.intersection(valid_role_ids)), valid_role_ids
+
+
+def split_ping_message(message: str) -> list[str]:
+    """Keep mentions intact and reserve space for continuation labels.
+
+    Also cap distinct user mentions per batch at 100, so each batch can
+    use Discord's explicit allowed-users list safely.
+    """
+    continuation = "**LFG ping continued:**\n"
+    messages = []
+    prefix = ""
+    parts = []
+    length = 0
+    user_ids = set()
+    for match in re.finditer(r"<@!?(\d+)>|[\s\S]", message):
+        token = match.group(0)
+        user_id = int(match.group(1)) if match.group(1) else None
+        if (len(prefix) + length + len(token) > 2000
+                or (user_id is not None and user_id not in user_ids
+                    and len(user_ids) >= 100)):
+            messages.append(prefix + "".join(parts))
+            prefix = continuation
+            parts = []
+            length = 0
+            user_ids = set()
+        parts.append(token)
+        length += len(token)
+        if user_id is not None:
+            user_ids.add(user_id)
+    if parts:
+        messages.append(prefix + "".join(parts))
+    return messages
+
 
 class UserCommands(commands.Cog):
     def __init__(self, bot):
@@ -202,77 +280,215 @@ class UserCommands(commands.Cog):
         note="Optional note or extra details"
     )
     @app_commands.checks.cooldown(1, 30.0)
+    @app_commands.guild_only()
     @app_commands.autocomplete(game=autocomplete_games)
-    async def ping_game(self, interaction: discord.Interaction, game: str, note: str = None):
+    async def ping_game(
+            self,
+            interaction: discord.Interaction,
+            game: str,
+            note: str = None
+    ):
+        if not interaction.guild:
+            await interaction.response.send_message(
+                "This command can only be used inside a server.",
+                ephemeral=True
+            )
+            return
+
         # 1. Check LFG channel permissions before deferring
-        if interaction.guild_id:
-            allowed = await is_lfg_allowed_in_channel(interaction.guild_id, interaction.channel_id)
-            if not allowed:
-                await interaction.response.send_message(
-                    "❌ LFG pings are not allowed in this channel.",
+        allowed = await is_lfg_allowed_in_channel(
+            interaction.guild.id,
+            interaction.channel_id
+        )
+
+        if not allowed:
+            await interaction.response.send_message(
+                "❌ LFG pings are not enabled in this channel. A moderator can run `/config setup_bot` or `/config set_lfg_channels`.",
+                ephemeral=True
+            )
+            return
+
+        # 2. Check optional server ping-role restrictions
+        role_allowed, allowed_role_ids = await can_user_ping_game(interaction)
+
+        if not role_allowed:
+            role_mentions = " ".join(
+                f"<@&{role_id}>"
+                for role_id in allowed_role_ids
+            )
+
+            await interaction.response.send_message(
+                "⛔ You need one of the server's allowed LFG ping roles "
+                "to use `/ping_game`."
+                + (
+                    f"\nAllowed roles: {role_mentions}"
+                    if role_mentions
+                    else ""
+                ),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none()
+            )
+            return
+
+        # 3. Defer publicly because a successful LFG ping should be public.
+        #
+        # If we later discover an error/cooldown condition, we delete this
+        # deferred response and send a separate ephemeral follow-up instead.
+        await interaction.response.defer()
+
+        clean_game = (
+            game.strip()
+            .replace("’", "'")
+            .replace("‘", "'")
+        )
+
+        current_guild_id = interaction.guild.id
+
+        # 4. Database handling
+        async with aiosqlite.connect(DB_PATH) as db:
+
+            # Lookup game ID
+            async with db.execute(
+                    """
+                    SELECT id, name
+                    FROM igdb_games
+                    WHERE name = ? COLLATE NOCASE
+                    """,
+                    (clean_game,)
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            if not row:
+                # The interaction was publicly deferred, so remove that response
+                # before sending a private error message.
+                await interaction.delete_original_response()
+
+                await interaction.followup.send(
+                    "Game not found.",
                     ephemeral=True
                 )
                 return
 
-        # 2. Defer immediately to prevent Discord interaction timeout
-        await interaction.response.defer(ephemeral=True)
+            # Normalize DLCs/editions to their base game
+            game_id, official_name = await resolve_to_base_game(
+                row[0],
+                row[1]
+            )
 
-        clean_game = game.strip().replace("’", "'").replace("‘", "'")
-        current_guild_id = interaction.guild_id or 0
-
-        # 3. Single-context database handling
-        async with aiosqlite.connect(DB_PATH) as db:
-            # Lookup game ID
-            async with db.execute("SELECT id, name FROM igdb_games WHERE name = ? COLLATE NOCASE", (clean_game,)) as cursor:
-                row = await cursor.fetchone()
-
-            if not row:
-                await interaction.followup.send("Game not found.", ephemeral=True)
-                return
-
-            game_id, official_name = await resolve_to_base_game(row[0], row[1])
-
-            # Fetch all subscribers and check quiet mode status
+            # Fetch all subscribers and their quiet-mode status
             async with db.execute(
                     """
                     SELECT
                         s.user_id,
-                        CASE WHEN (COALESCE(ugs.quiet_mode, us.quiet_mode, 0) = 1) THEN 1 ELSE 0 END AS is_quiet
+                        CASE
+                            WHEN (
+                                COALESCE(
+                                        ugs.quiet_mode,
+                                        us.quiet_mode,
+                                        0
+                                ) = 1
+                                )
+                                THEN 1
+                            ELSE 0
+                            END AS is_quiet
                     FROM subscriptions s
-                             LEFT JOIN user_settings us ON s.user_id = us.user_id
-                             LEFT JOIN user_guild_settings ugs ON s.user_id = ugs.user_id AND ugs.guild_id = ?
+                             LEFT JOIN user_settings us
+                                       ON s.user_id = us.user_id
+                             LEFT JOIN user_guild_settings ugs
+                                       ON s.user_id = ugs.user_id
+                                           AND ugs.guild_id = ?
                     WHERE s.game_id = ?
                       AND s.user_id != ?
                     """,
-                    (current_guild_id, game_id, interaction.user.id)
+                    (
+                            current_guild_id,
+                            game_id,
+                            interaction.user.id
+                    )
             ) as cursor:
                 rows = await cursor.fetchall()
 
+            # Fetch caller's custom ping template
             async with db.execute(
-                    "SELECT ping_template FROM user_settings WHERE user_id = ?",
+                    """
+                    SELECT ping_template
+                    FROM user_settings
+                    WHERE user_id = ?
+                    """,
                     (interaction.user.id,)
             ) as cursor:
                 template_row = await cursor.fetchone()
 
-        # Filter subscribers strictly to members present in the current server
-        if interaction.guild:
-            rows = [r for r in rows if interaction.guild.get_member(r[0]) is not None]
+        # 5. Keep only subscribers who are actually members of this server
+        rows = [
+            row
+            for row in rows
+            if interaction.guild.get_member(row[0]) is not None
+        ]
 
+        # No actual recipients -> private failure message
         if not rows:
-            await interaction.followup.send(f"No other subscribers in this server to ping for **{official_name}**.")
+            await interaction.delete_original_response()
+
+            await interaction.followup.send(
+                f"No other subscribers in this server to ping for "
+                f"**{official_name}**.",
+                ephemeral=True
+            )
             return
 
-        active_user_ids = [r[0] for r in rows if r[1] == 0]
-        quiet_user_ids = [r[0] for r in rows if r[1] == 1]
+        # 6. Claim the server/game cooldown only after confirming this would
+        # produce a real LFG ping.
+        #
+        # claim_game_ping_cooldown() uses persistent DB state, so the cooldown
+        # survives bot restarts and applies across different users.
+        cooldown_allowed, retry_after = await claim_game_ping_cooldown(
+            current_guild_id,
+            game_id
+        )
 
-        # Only active users are actual Discord mentions
-        active_mentions = " ".join(f"<@{uid}>" for uid in active_user_ids)
+        if not cooldown_allowed:
+            retry_timestamp = int(time.time()) + retry_after
+
+            # Remove the publicly deferred response first.
+            await interaction.delete_original_response()
+
+            # Now this is a genuinely separate ephemeral follow-up.
+            await interaction.followup.send(
+                f"⏳ **{official_name}** was pinged recently. "
+                f"It can be pinged again <t:{retry_timestamp}:R>.",
+                ephemeral=True
+            )
+            return
+
+        # 7. Separate normal and quiet-mode subscribers
+        active_user_ids = [
+            row[0]
+            for row in rows
+            if row[1] == 0
+        ]
+
+        quiet_user_ids = [
+            row[0]
+            for row in rows
+            if row[1] == 1
+        ]
+
+        # 8. Build the ping message
+        all_mentions = " ".join(
+            f"<@{row[0]}>"
+            for row in rows
+        )
 
         caller_mention = interaction.user.mention
         formatted_game = f"**{official_name}**"
         clean_note = note.strip() if note else ""
 
-        custom_template = template_row[0] if template_row and template_row[0] else None
+        custom_template = (
+            template_row[0]
+            if template_row and template_row[0]
+            else None
+        )
 
         if custom_template:
             msg = (
@@ -280,55 +496,71 @@ class UserCommands(commands.Cog):
                 .replace("{caller}", caller_mention)
                 .replace("{user}", caller_mention)
                 .replace("{game}", formatted_game)
-                .replace("{mentions}", active_mentions)
+                .replace("{mentions}", all_mentions)
                 .replace("{note}", clean_note)
             )
 
+            # Make sure an entered note isn't silently lost if the user's
+            # template doesn't contain {note}.
             if clean_note and clean_note not in msg:
                 msg += f"\n> {clean_note}"
 
-            if active_mentions and active_mentions not in msg:
-                msg += f"\n{active_mentions}"
+            # Make sure subscribers remain represented even if the user's
+            # template does not contain {mentions}.
+            if all_mentions not in msg:
+                msg += f"\n{all_mentions}"
 
         else:
-            msg = f"{caller_mention} wants to play {formatted_game}!"
-
-            if active_mentions:
-                msg += f" {active_mentions}"
+            msg = (
+                f"{caller_mention} wants to play "
+                f"{formatted_game}! {all_mentions}"
+            )
 
             if clean_note:
                 msg += f"\n> {clean_note}"
 
-        # Quiet users are shown by display name, but are NOT actual mentions
+        # 9. Display quiet-mode users without actually notifying them
         if quiet_user_ids:
-            quiet_names = []
+            quiet_mentions_str = ", ".join(
+                f"<@{uid}>"
+                for uid in quiet_user_ids
+            )
 
-            for uid in quiet_user_ids:
-                member = interaction.guild.get_member(uid)
-                if member:
-                    quiet_names.append(member.display_name)
+            verb = (
+                "has"
+                if len(quiet_user_ids) == 1
+                else "have"
+            )
 
-            if quiet_names:
-                quiet_names_str = ", ".join(quiet_names)
-                verb = "has" if len(quiet_names) == 1 else "have"
-                msg += f"\n\n-# {quiet_names_str} {verb} quiet mode turned on"
+            msg += (
+                f"\n\n-# {quiet_mentions_str} "
+                f"{verb} quiet mode turned on"
+            )
 
-        # Process all user mentions that actually appear in the message.
-        # Since only active subscribers are represented as <@id>, only they get pinged.
-        allowed_mentions = discord.AllowedMentions(
-            users=True,
-            roles=False,
-            everyone=False
-        )
+        # 10. Send bounded public batches. Only active subscribers in the
+        # current batch may be notified, and repeated template/quiet-summary
+        # mentions must not notify the same subscriber again.
+        active_ids = set(active_user_ids)
+        notified_ids = set()
+        for message in split_ping_message(msg):
+            mentioned_ids = {
+                int(uid) for uid in re.findall(r"<@!?(\d+)>", message)
+            }
+            batch_ids = (mentioned_ids & active_ids) - notified_ids
+            allowed_mentions = discord.AllowedMentions(
+                users=[discord.Object(id=uid) for uid in sorted(batch_ids)]
+                if batch_ids else False,
+                roles=False,
+                everyone=False
+            )
+            await interaction.followup.send(
+                message,
+                allowed_mentions=allowed_mentions
+            )
+            notified_ids.update(batch_ids)
 
-        # Send as a regular bot message, rather than an interaction webhook
-        await interaction.channel.send(
-            msg,
-            allowed_mentions=allowed_mentions,
-            silent=False
-        )
-
-        await interaction.delete_original_response()
+        # One completed LFG call, regardless of how many mention batches it sent.
+        stats.increment("pings_sent")
 
     @app_commands.command(name="set_ping_template", description="Customize how your /ping_game calls look")
     @app_commands.describe(template="Your custom message. Placeholders: {caller}, {game}, {mentions}, {note}")
@@ -810,6 +1042,40 @@ class UserCommands(commands.Cog):
                 ephemeral=True
             )
 
+    @app_commands.command(name="privacy", description="View data practices, deletion options and privacy contact")
+    async def privacy(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="LFG Notice Bot — Privacy",
+            description=(
+                "Game subscriptions are global across servers where you and the bot are present. "
+                "The bot stores Discord IDs, game subscriptions, notification preferences, "
+                "custom templates and server configuration. Operational counters are aggregate "
+                "and kept in memory until restart; they contain no user IDs or message contents. "
+                "Unexpected errors are logged for troubleshooting."
+            ),
+            color=discord.Color.blue(),
+        )
+        embed.add_field(
+            name="Delete your data",
+            value=f"Use {fmt(self.bot, 'unsubscribe')}, {fmt(self.bot, 'delete_my_subscriptions')} or {fmt(self.bot, 'delete_all_my_data')}.",
+            inline=False,
+        )
+        embed.add_field(
+            name="Contact",
+            value=os.getenv("PRIVACY_CONTACT") or "badhuntilian@gmail.com",
+            inline=False,
+        )
+        policy_url = (os.getenv("PRIVACY_POLICY_URL") or "").strip()
+        if policy_url.startswith(("https://", "http://")):
+            embed.add_field(name="Full privacy policy", value=policy_url, inline=False)
+        else:
+            embed.add_field(
+                name="Full privacy policy",
+                value="Ask the bot developer or your server administrator for the full policy.",
+                inline=False,
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     @app_commands.command(name="help", description="Show information about available bot commands")
     @app_commands.describe(public="Set to True to send response publicly in channel (Default: False)")
     async def help_command(self, interaction: discord.Interaction, public: bool = False):
@@ -837,7 +1103,7 @@ class UserCommands(commands.Cog):
         embed.add_field(
             name="Server Activity & Social",
             value=(
-                f"• {fmt(self.bot, 'ping_game')} `<game>` `[public]` — Send an LFG ping mentioning subscribers.\n"
+                f"• {fmt(self.bot, 'ping_game')} `<game>` `[note]` — Send an LFG ping mentioning subscribers.\n"
                 f"• {fmt(self.bot, 'quiet_mode')} `[enabled]` `[scope]` — Toggle or set quiet mode notifications globally or per-server.\n"
                 f"• {fmt(self.bot, 'set_ping_template')} `<template>` — Set custom template for `/ping_game` notifications.\n"
                 f"• {fmt(self.bot, 'view_ping_template')} — View your saved custom ping format.\n"
@@ -864,13 +1130,14 @@ class UserCommands(commands.Cog):
             name="Info",
             value=(
                 f"• {fmt(self.bot, 'help')} — View this help message.\n"
+                f"• {fmt(self.bot, 'privacy')} — View privacy, deletion options and contact.\n"
                 f"• {fmt(self.bot, 'quickstart')} — View quickstart message."
             ),
             inline=False
         )
 
-        # Conditionally display admin section if user has Administrator permissions or is bot owner
-        is_admin = interaction.permissions and interaction.permissions.administrator
+        # Show configuration commands to users who can run them.
+        is_admin = interaction.permissions and interaction.permissions.manage_messages
         raw_owner_id = os.getenv("BOT_OWNER_ID")
         is_owner = raw_owner_id and raw_owner_id.isdigit() and interaction.user.id == int(raw_owner_id)
 
@@ -889,14 +1156,25 @@ class UserCommands(commands.Cog):
             )
 
             embed.add_field(
+                name="Server Setup",
+                value=(
+                    f"• {fmt(self.bot, 'config', 'setup_bot')} — Private wizard: allowed channels, ping roles, same-game cooldown and optional Quickstart guide.\n"
+                    "Step 1: select channels to restrict pings, or Continue — allow all channels for no channel restriction. New servers block pings until configured. Review and save to apply; canceling or timing out changes nothing."
+                ),
+                inline=False
+            )
+
+            embed.add_field(
                 name="Server Configuration",
                 value=(
                     f"• {fmt(self.bot, 'config', 'set_lfg_channels')} `<mode> [channel]` — Allow all channels or add whitelisted channels.\n"
                     f"• {fmt(self.bot, 'config', 'remove_lfg_channels')} `<mode> [channel]` — Disable all channels or remove a whitelisted channel.\n"
                     f"• {fmt(self.bot, 'config', 'view_lfg_channels')} — View current LFG channel configuration.\n"
+                    f"• {fmt(self.bot, 'config', 'ping_cooldown')} `[minutes]` — Same-game cooldown; decimals allowed (default: 30 seconds; 0 disables).\n"
+                    f"• {fmt(self.bot, 'config', 'ping_roles')} `<action>` `[role]` — Restrict who may call `/ping_game` (default: everyone).\n"
                     f"• {fmt(self.bot, 'config', 'setup_quickstart')} — Post a Quickstart Guide embed.\n"
                     f"• {fmt(self.bot, 'config', 'remove_quickstart')} `<message>` — Remove a Quickstart Guide message.\n"
-                    f"• {fmt(self.bot, 'config', 'update_quickstart')} `[message]` — Reload Quickstart messages."
+                    f"• {fmt(self.bot, 'config', 'update_quickstart')} `[message]` — Reload Quickstart messages (in case of an update)."
                 ),
                 inline=False
             )
