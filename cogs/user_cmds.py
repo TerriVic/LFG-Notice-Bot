@@ -3,16 +3,16 @@ import logging
 import os
 import re
 import time
+from time import time as now_unix
 
 import aiosqlite
-from operations import stats
-import os
-
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from database import DB_PATH, claim_game_ping_cooldown, get_guild_ping_role_ids
+from operations import stats
+from ping_time import parse_ping_time, TIME_PRESETS
 from utils import (
     resolve_to_base_game,
     autocomplete_games,
@@ -58,6 +58,24 @@ async def autocomplete_user_subscriptions(interaction: discord.Interaction, curr
         )
         for row in rows
     ]
+
+async def autocomplete_ping_time(_interaction: discord.Interaction, current: str):
+    """Common relative starts and a selectable valid custom expression."""
+    current = current.strip()
+    choices = []
+    if current and len(current) <= 100:
+        try:
+            parse_ping_time(current)
+        except ValueError:
+            pass
+        else:
+            choices.append(app_commands.Choice(name=f"Use entered time: {current}"[:100], value=current))
+    for label, value in TIME_PRESETS:
+        if not current or current.lower() in label.lower() or current.lower() in value:
+            if value != current:
+                choices.append(app_commands.Choice(name=label, value=value))
+    return choices[:25]
+
 
 async def can_user_ping_game(interaction: discord.Interaction) -> tuple[bool, list[int]]:
     """Check server ping-role restrictions, with owner/moderator bypass."""
@@ -111,7 +129,7 @@ def split_ping_message(message: str) -> list[str]:
     parts = []
     length = 0
     user_ids = set()
-    for match in re.finditer(r"<@!?(\d+)>|[\s\S]", message):
+    for match in re.finditer(r"<@!?(\d+)>|<t:\d+(?::[tTdDfFsSR])?>|[\s\S]", message):
         token = match.group(0)
         user_id = int(match.group(1)) if match.group(1) else None
         if (len(prefix) + length + len(token) > 2000
@@ -278,16 +296,18 @@ class UserCommands(commands.Cog):
     @app_commands.command(name="ping_game", description="Ping all users subscribed to a game")
     @app_commands.describe(
         game="The game to ping subscribers for",
-        note="Optional note or extra details"
+        note="Optional note or extra details",
+        time="Optional start: 30m, 2h, Discord <t:...>, or ISO date/time with UTC offset"
     )
     @app_commands.checks.cooldown(1, 30.0)
     @app_commands.guild_only()
-    @app_commands.autocomplete(game=autocomplete_games)
+    @app_commands.autocomplete(game=autocomplete_games, time=autocomplete_ping_time)
     async def ping_game(
             self,
             interaction: discord.Interaction,
             game: str,
-            note: str = None
+            note: str = None,
+            time: str = None,
     ):
         if not interaction.guild:
             await interaction.response.send_message(
@@ -295,6 +315,18 @@ class UserCommands(commands.Cog):
                 ephemeral=True
             )
             return
+
+        # Validate before any database work, cooldown claims, or public pings.
+        rendered_time = None
+        if time is not None:
+            try:
+                start_timestamp, _ = parse_ping_time(time)
+            except ValueError as exc:
+                await interaction.response.send_message(f"❌ Invalid start time: {exc}", ephemeral=True)
+                return
+            # Always show relative time, including for pasted Discord timestamps
+            # originally formatted as a specific date/time style.
+            rendered_time = f"<t:{start_timestamp}:R>"
 
         # 1. Check LFG channel permissions before deferring
         allowed = await is_lfg_allowed_in_channel(
@@ -445,7 +477,7 @@ class UserCommands(commands.Cog):
         )
 
         if not cooldown_allowed:
-            retry_timestamp = int(time.time()) + retry_after
+            retry_timestamp = int(now_unix()) + retry_after
 
             # Remove the private deferred status first.
             await interaction.delete_original_response()
@@ -497,7 +529,13 @@ class UserCommands(commands.Cog):
                 .replace("{game}", formatted_game)
                 .replace("{mentions}", all_mentions)
                 .replace("{note}", clean_note)
+                .replace("{time}", rendered_time or "")
             )
+
+            # Keep the scheduling information visible for older/custom templates
+            # that have no {time} placeholder.
+            if rendered_time and "{time}" not in custom_template:
+                msg += f"\n*Starting {rendered_time}*"
 
             # Make sure an entered note isn't silently lost if the user's
             # template doesn't contain {note}.
@@ -518,6 +556,9 @@ class UserCommands(commands.Cog):
             if clean_note:
                 msg += f"\n> {clean_note}"
 
+            if rendered_time:
+                msg += f"\n*Starting {rendered_time}*"
+
         # Quiet users are plain display names, never notification mentions.
         if quiet_user_ids:
             quiet_names = ", ".join(plain_user_name(uid) for uid in quiet_user_ids)
@@ -531,19 +572,28 @@ class UserCommands(commands.Cog):
 
         def eligible_mention(match):
             uid = int(match.group(1))
+            # Keep the caller as a clickable Discord mention, but never notify
+            # them: only active subscriber IDs are allowed to produce pings.
+            if uid == interaction.user.id:
+                return match.group(0)
             if uid in active_ids and uid not in seen_ids:
                 seen_ids.add(uid)
                 return match.group(0)
             return plain_user_name(uid)
 
         msg = re.sub(r"<@!?(\d+)>", eligible_mention, msg)
-        allowed_mentions = discord.AllowedMentions(
-            users=True, roles=False, everyone=False, replied_user=False
-        )
         for message in split_ping_message(msg):
+            # A mention in the text does not itself have to trigger a ping.
+            # Whitelist only actual subscribers present in THIS batch; the
+            # caller is excluded even if subscribed to their own game.
             expected_ids = {
                 int(uid) for uid in re.findall(r"<@!?(\d+)>", message)
+                if int(uid) in active_ids
             }
+            allowed_mentions = discord.AllowedMentions(
+                users=[discord.Object(id=uid) for uid in sorted(expected_ids)],
+                roles=False, everyone=False, replied_user=False
+            )
             sent = await interaction.channel.send(
                 message, allowed_mentions=allowed_mentions, silent=False
             )
@@ -567,7 +617,7 @@ class UserCommands(commands.Cog):
             )
 
     @app_commands.command(name="set_ping_template", description="Customize how your /ping_game calls look")
-    @app_commands.describe(template="Your custom message. Placeholders: {caller}, {game}, {mentions}, {note}")
+    @app_commands.describe(template="Custom ping. Placeholders: {caller}, {game}, {mentions}, {note}, {time}")
     async def set_ping_template(self, interaction: discord.Interaction, template: str):
         if len(template) > 300:
             await interaction.response.send_message("Template is too long! Please keep it under 300 characters.", ephemeral=True)
@@ -602,6 +652,7 @@ class UserCommands(commands.Cog):
             .replace("{game}", "**Wardogs**")
             .replace("{mentions}", mock_mentions)
             .replace("{note}", "Looking for 2 more!")
+            .replace("{time}", f"<t:{int(time.time()) + 7200}:R>")
         )
 
         await interaction.response.send_message(
@@ -622,7 +673,7 @@ class UserCommands(commands.Cog):
         if not row or not row[0]:
             await interaction.response.send_message(
                 "You are currently using the **default ping format**:\n"
-                "`<caller> wants to play <game>! <mentions> <note>`",
+                "`<caller> wants to play <game>! <mentions> [note] \n[time]`",
                 ephemeral=True
             )
             return
@@ -638,6 +689,7 @@ class UserCommands(commands.Cog):
             .replace("{game}", "**Wardogs**")
             .replace("{mentions}", mock_mentions)
             .replace("{note}", "Looking for 2 more!")
+            .replace("{time}", f"<t:{int(time.time()) + 7200}:R>")
         )
 
         await interaction.response.send_message(
@@ -1107,7 +1159,7 @@ class UserCommands(commands.Cog):
         embed.add_field(
             name="Server Activity & Social",
             value=(
-                f"• {fmt(self.bot, 'ping_game')} `<game>` `[note]` — Send an LFG ping mentioning subscribers.\n"
+                f"• {fmt(self.bot, 'ping_game')} `<game>` `[note]` `[time]` — Ping subscribers; optional relative start time.\n"
                 f"• {fmt(self.bot, 'quiet_mode')} `[enabled]` `[scope]` — Toggle or set quiet mode notifications globally or per-server.\n"
                 f"• {fmt(self.bot, 'set_ping_template')} `<template>` — Set custom template for `/ping_game` notifications.\n"
                 f"• {fmt(self.bot, 'view_ping_template')} — View your saved custom ping format.\n"
