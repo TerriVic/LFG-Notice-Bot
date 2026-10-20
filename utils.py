@@ -686,7 +686,7 @@ def build_quickstart_embed(bot: commands.Bot) -> discord.Embed:
     )
     embed.add_field(
         name="2️⃣ Call an LFG Ping",
-        value=f"Use {format_command_mention(bot, 'ping_game')} `<game>` `[note]` when you need a squad for a session.",
+        value=f"Use {format_command_mention(bot, 'ping_game')} `<game>` `[note]` `[time]` to gather teammates now or schedule a future session.",
         inline=False
     )
     embed.add_field(
@@ -745,7 +745,7 @@ class GameInfoSubscribeView(discord.ui.View):
         self.cursor = cursor
 
     @discord.ui.button(label="Subscribe to Game 🔔", style=discord.ButtonStyle.primary, custom_id="btn_sub_game")
-    async def subscribe_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def subscribe_button(self, interaction: discord.Interaction, _button: discord.ui.Button):
         user_id = interaction.user.id
 
         # Check if already subscribed

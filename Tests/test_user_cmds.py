@@ -390,6 +390,7 @@ async def test_ping_game_success(setup_test_db, cleanup_failure):
     caller_interaction.followup.send.assert_not_awaited()
 
     sent_msg = caller_interaction.channel.send.await_args.args[0]
+    assert "<@101>" in sent_msg  # Caller shown as clickable mention, no notification.
     assert "<@202>" in sent_msg
     assert "Portal 2" in sent_msg
     assert "Let's play co-op!" in sent_msg
@@ -397,7 +398,8 @@ async def test_ping_game_success(setup_test_db, cleanup_failure):
     send_kwargs = caller_interaction.channel.send.await_args.kwargs
     assert send_kwargs["silent"] is False
     allowed_mentions = send_kwargs["allowed_mentions"]
-    assert allowed_mentions.users is True
+    assert [user.id for user in allowed_mentions.users] == [202]
+    assert all(user.id != 101 for user in allowed_mentions.users)
     assert allowed_mentions.roles is False
     assert allowed_mentions.everyone is False
 
@@ -463,9 +465,9 @@ async def test_ping_game_with_custom_template(mock_resolve, mock_lfg_allowed, se
 
     sent_msg = interaction.channel.send.await_args.args[0]
 
-    assert "Custom alert by TestPlayer for **Elden Ring**!" in sent_msg
-    assert "<@101>" not in sent_msg
+    assert "Custom alert by <@101> for **Elden Ring**!" in sent_msg
     assert "<@102>" in sent_msg
+    assert [user.id for user in interaction.channel.send.await_args.kwargs["allowed_mentions"].users] == [102]
     assert "Need a tank" in sent_msg
 
 
@@ -502,17 +504,18 @@ async def test_ping_game_with_quiet_users(mock_resolve, mock_lfg_allowed, setup_
     # 3. Act: Invoke ping_game
     await cog.ping_game.callback(cog, interaction, game="Portal 2", note="Let's play co-op!")
 
-    # 4. Quiet subscribers are plain names, not user mention tokens.
+    # 4. Quiet subscribers are clickable mentions, excluded from notifications.
     interaction.response.defer.assert_awaited_once_with(ephemeral=True)
     interaction.channel.send.assert_awaited_once()
     interaction.delete_original_response.assert_awaited_once()
     interaction.followup.send.assert_not_awaited()
 
     sent_msg = interaction.channel.send.await_args.args[0]
-    assert "QuietPlayer" in sent_msg
-    assert "<@202>" not in sent_msg
+    assert "QuietPlayer" not in sent_msg
+    assert "<@101>" in sent_msg
+    assert "<@202> has quiet mode turned on" in sent_msg
     allowed_mentions = interaction.channel.send.await_args.kwargs["allowed_mentions"]
-    assert allowed_mentions.users is True
+    assert allowed_mentions.users == []
     assert allowed_mentions.roles is False
     assert allowed_mentions.everyone is False
     assert "has quiet mode turned on" in sent_msg
@@ -559,8 +562,8 @@ async def test_set_ping_template_success(setup_test_db):
 
 
 @pytest.mark.asyncio
-async def test_set_ping_template_auto_append_mentions(setup_test_db):
-    """Test that {mentions} is automatically appended if missing from the custom template."""
+async def test_set_ping_template_preserves_authored_template(setup_test_db):
+    """Keep missing tags visible to later previews by storing the authored template."""
     interaction = make_mock_interaction(user_id=101)
     cog = UserCommands(bot=MagicMock())
 
@@ -568,13 +571,13 @@ async def test_set_ping_template_auto_append_mentions(setup_test_db):
 
     await cog.set_ping_template.callback(cog, interaction, template=template_str)
 
-    # Verify database update includes the automatically appended {mentions}
+    # Verify the authored template is stored unchanged
     async with aiosqlite.connect(setup_test_db) as db:
         async with db.execute("SELECT ping_template FROM user_settings WHERE user_id = ?", (101,)) as cursor:
             row = await cursor.fetchone()
 
     assert row is not None
-    assert row[0] == template_str + "\n{mentions}"
+    assert row[0] == template_str  # Authored tags are preserved; fallback is rendered.
 
 @pytest.mark.asyncio
 async def test_view_ping_template_default(setup_test_db):
@@ -613,7 +616,7 @@ async def test_view_ping_template_custom(setup_test_db):
 
     assert "Your Current Custom Template:" in msg
     # Verify that placeholders like {caller} and {game} were correctly parsed in the preview
-    assert "Custom template by <@101> for **Wardogs**!" in msg
+    assert "Custom template by <@101> for **[game]**!" in msg
     assert interaction.response.send_message.call_args.kwargs.get("ephemeral") is True
 
 @pytest.mark.asyncio
@@ -1127,7 +1130,7 @@ async def test_view_subscribed_indicator_default(setup_test_db):
 async def test_view_subscribed_indicator_custom(setup_test_db):
     """Test view_subscribed_indicator displays the user's custom indicator."""
     interaction = make_mock_interaction(user_id=101)
-    cog = UserSettings = UserCommands(bot=MagicMock())
+    cog = UserCommands(bot=MagicMock())
 
     async with aiosqlite.connect(setup_test_db) as db:
         await db.execute(
@@ -1185,7 +1188,7 @@ async def test_reset_subscribed_indicator(setup_test_db):
     "short ping <@123>",
     "x" * 2000,
     "x" * 2001,
-    "x" * 1995 + "<@123456789012345678>",
+    "x" * 1995 + "[mentions]",
     "long note " + "x" * 10000,
     " ".join(f"<@{100000000000000000 + i}>" for i in range(1500)),
     ], ids=[
@@ -1266,15 +1269,320 @@ async def test_ping_game_many_batches_preserves_quiet_mode_and_notifies_once(mon
         assert call.kwargs["silent"] is False
         allowed = call.kwargs["allowed_mentions"]
         assert allowed.roles is False and allowed.everyone is False
-        assert allowed.users is True
         assert "<@999999999999999999>" not in message
         batch_ids = [int(uid) for uid in re.findall(r"<@!?(\d+)>", message)]
-        assert len(batch_ids) <= 100
+        assert len(set(batch_ids)) <= 100
         assert all(f"<@{uid}>" in message for uid in batch_ids)
-        notified.extend(batch_ids)
+        allowed_ids = [user.id for user in allowed.users]
+        assert set(allowed_ids) == (set(batch_ids) & set(ids[::2]))
+        assert 101 not in allowed_ids
+        notified.extend(allowed_ids)
+    assert '<@101>' in calls[0].args[0]
     assert sorted(notified) == ids[::2]
     text = calls[0].args[0] + "".join(call.args[0].removeprefix("**LFG ping continued:**\n") for call in calls[1:])
     assert all(f"<@{uid}>" in text for uid in ids[::2])
-    assert all(f"<@{uid}>" not in text for uid in ids[1::2])
-    assert all(f"Player-{uid}" in text for uid in ids[1::2])
+    assert all(f"<@{uid}>" in text for uid in ids[1::2])
+    assert all(f"Player-{uid}" not in text for uid in ids[1::2])
     assert "Let's play!" in text
+
+
+# -----------------------------------------------------------------------------
+# /ping_game scheduled timestamp feature
+# -----------------------------------------------------------------------------
+
+def test_ping_game_has_only_optional_time_no_format_option():
+    import inspect
+    command = UserCommands.ping_game
+    params = inspect.signature(command.callback).parameters
+    assert 'time' in params
+    assert 'time_format' not in params
+    option_names = {param.name for param in command.parameters}
+    assert 'time' in option_names
+    assert 'time_format' not in option_names
+
+@pytest.mark.asyncio
+async def test_autocomplete_ping_time_presets_and_custom_input():
+    from cogs.user_cmds import autocomplete_ping_time
+    choices = await autocomplete_ping_time(None, '')
+    assert any(choice.value == '30m' for choice in choices)
+    assert len(choices) <= 25
+    assert (await autocomplete_ping_time(None, '45m'))[0].value == '45m'
+    assert (await autocomplete_ping_time(None, 'tomorrow 20:00')) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('source', [
+    '1h30m',
+    '2100-01-02T20:00+03:00',
+    '<t:4102444800:F>',  # A pasted full-date timestamp should still render relatively.
+])
+async def test_ping_game_scheduled_always_relative(setup_test_db, source):
+    cog = UserCommands(bot=MagicMock())
+    interaction = make_mock_interaction(user_id=101)
+    interaction.guild.get_member = lambda uid: MagicMock(id=uid, display_name='Player')
+    async with aiosqlite.connect(setup_test_db) as db:
+        await db.execute('INSERT INTO subscriptions (user_id, game_id) VALUES (?, ?)', (202, 1))
+        await db.commit()
+    with patch('cogs.user_cmds.is_lfg_allowed_in_channel', new=AsyncMock(return_value=True)), \
+         patch('cogs.user_cmds.claim_game_ping_cooldown', new=AsyncMock(return_value=(True, 0))), \
+         patch('cogs.user_cmds.resolve_to_base_game', new=AsyncMock(return_value=(1, 'Portal 2'))):
+        await cog.ping_game.callback(cog, interaction, game='Portal 2', time=source)
+    sent = interaction.channel.send.await_args.args[0]
+    assert re.search(r'<t:\d+:[tTdDfFsSR]>', sent)
+    assert re.search(r'<t:\d+:R>', sent)
+    assert ':F>' not in sent
+    assert 'Starting' in sent
+    assert '<@202>' in sent
+    assert [user.id for user in interaction.channel.send.await_args.kwargs['allowed_mentions'].users] == [202]
+
+
+@pytest.mark.asyncio
+async def test_ping_game_custom_template_has_explicit_time_placeholder(setup_test_db):
+    cog = UserCommands(bot=MagicMock())
+    interaction = make_mock_interaction(user_id=101)
+    interaction.guild.get_member = lambda uid: MagicMock(id=uid, display_name='Player')
+    async with aiosqlite.connect(setup_test_db) as db:
+        await db.execute('INSERT INTO subscriptions VALUES (202, 1)')
+        await db.execute("INSERT INTO user_settings (user_id, guild_id, ping_template) VALUES (101, 0, 'Join {game} at {time}: {mentions}')")
+        await db.commit()
+    with patch('cogs.user_cmds.is_lfg_allowed_in_channel', new=AsyncMock(return_value=True)), \
+         patch('cogs.user_cmds.claim_game_ping_cooldown', new=AsyncMock(return_value=(True, 0))), \
+         patch('cogs.user_cmds.resolve_to_base_game', new=AsyncMock(return_value=(1, 'Portal 2'))):
+        await cog.ping_game.callback(cog, interaction, game='Portal 2', time='2h')
+    sent = interaction.channel.send.await_args.args[0]
+    assert 'Join **Portal 2** at <t:' in sent
+    assert 'Starting' not in sent
+    assert '<@202>' in sent
+
+
+@pytest.mark.asyncio
+async def test_ping_game_invalid_time_does_not_send_or_claim_cooldown(setup_test_db):
+    cog = UserCommands(bot=MagicMock())
+    interaction = make_mock_interaction(user_id=101)
+    with patch('cogs.user_cmds.claim_game_ping_cooldown', new=AsyncMock()) as claim:
+        await cog.ping_game.callback(cog, interaction, game='Portal 2', time='tomorrow 8pm')
+        claim.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
+    assert 'Invalid start time' in interaction.response.send_message.await_args.args[0]
+    interaction.response.defer.assert_not_awaited()
+    interaction.channel.send.assert_not_awaited()
+
+
+def test_split_ping_message_keeps_timestamp_token_whole():
+    from cogs.user_cmds import split_ping_message
+    ts = '<t:1791849600:F>'
+    input_text = 'a' * 1987 + ts + ' end'
+    chunks = split_ping_message(input_text)
+    assert len(chunks) == 2
+    assert ts in chunks[1]
+    assert all(len(chunk) <= 2000 for chunk in chunks)
+
+
+@pytest.mark.asyncio
+async def test_ping_game_preserves_caller_mention_without_ping_even_if_subscribed(setup_test_db):
+    """The caller may be subscribed, but only other active members are notified."""
+    cog = UserCommands(bot=MagicMock())
+    interaction = make_mock_interaction(user_id=101)
+    interaction.guild.get_member = lambda uid: MagicMock(id=uid, display_name=f'Player-{uid}')
+    async with aiosqlite.connect(setup_test_db) as db:
+        await db.executemany('INSERT INTO subscriptions (user_id, game_id) VALUES (?, ?)',
+                             [(101, 1), (202, 1)])
+        await db.commit()
+    with patch('cogs.user_cmds.is_lfg_allowed_in_channel', new=AsyncMock(return_value=True)), \
+         patch('cogs.user_cmds.claim_game_ping_cooldown', new=AsyncMock(return_value=(True, 0))), \
+         patch('cogs.user_cmds.resolve_to_base_game', new=AsyncMock(return_value=(1, 'Portal 2'))):
+        await cog.ping_game.callback(cog, interaction, game='Portal 2',
+                                     note='Join me <@101> <@999> <@202>')
+    sent = interaction.channel.send.await_args.args[0]
+    assert sent.count('<@101>') == 2  # Caller + explicit caller mention in note.
+    assert sent.count('<@202>') == 1  # Subscriber not pinged twice.
+    assert '<@999>' not in sent  # Arbitrary mentions are sanitized.
+    allowed = interaction.channel.send.await_args.kwargs['allowed_mentions']
+    assert [member.id for member in allowed.users] == [202]
+    assert allowed.roles is False and allowed.everyone is False
+    assert allowed.replied_user is False
+
+
+def test_ping_game_note_and_time_remain_optional():
+    options = {option["name"]: option for option in UserCommands.ping_game.to_dict(MagicMock())["options"]}
+    assert not options["note"]["required"]
+    assert not options["time"]["required"]
+
+
+@pytest.mark.asyncio
+async def test_help_fields_fit_with_real_command_mentions():
+    bot = MagicMock()
+    bot.command_ids = {command.name: 1234567890123456789 for command in UserCommands.__cog_app_commands__}
+    bot.command_ids["config"] = 1234567890123456789
+    interaction = make_mock_interaction()
+    await UserCommands.help_command.callback(UserCommands(bot), interaction)
+    embed = interaction.response.send_message.await_args.kwargs["embed"]
+    assert all(len(field.value) <= 1024 for field in embed.fields)
+    assert len(embed) <= 6000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("template,missing", [
+    ("Anyone playing?", ["{caller}", "{game}", "{mentions}"]),
+    ("{game} {mentions}", ["{caller}"]),
+    ("{caller} {mentions}", ["{game}"]),
+    ("{caller} {game}", ["{mentions}"]),
+    ("{user} {game} {mentions}", []),
+    ("{mentions} hosted by {caller}: {game}", []),
+    ("", ["{caller}", "{game}", "{mentions}"]),
+])
+async def test_template_save_and_view_show_same_fallbacks(setup_test_db, template, missing):
+    from cogs.user_cmds import render_ping_template
+    cog = UserCommands(bot=MagicMock())
+    interaction = make_mock_interaction(user_id=101)
+    with patch("cogs.user_cmds.time.time", return_value=1700000000):
+        await cog.set_ping_template.callback(cog, interaction, template)
+        saved = interaction.response.send_message.await_args
+        interaction.response.send_message.reset_mock()
+        await cog.view_ping_template.callback(cog, interaction)
+    viewed = interaction.response.send_message.await_args
+    expected, warning = render_ping_template(template, caller="<@101>", game="**[game]**",
+        mentions="[mentions]", note="[note]", scheduled_time="<t:1700007200:R>")
+    for call in (saved, viewed):
+        assert expected in call.args[0]
+        assert "⚠️ Missing tags:" in call.args[0] if missing else "⚠️" not in call.args[0]
+        assert warning in call.args[0]
+        assert call.kwargs["allowed_mentions"].users is False
+        assert call.kwargs["ephemeral"] is True
+    assert "<@101>" in expected and "**[game]**" in expected and "[mentions]" in expected
+    async with aiosqlite.connect(setup_test_db) as db:
+        assert (await (await db.execute("SELECT ping_template FROM user_settings WHERE user_id=101")).fetchone())[0] == template
+
+
+@pytest.mark.asyncio
+async def test_legacy_ping_template_gets_attribution_game_and_mentions(setup_test_db):
+    cog = UserCommands(bot=MagicMock())
+    interaction = make_mock_interaction(user_id=101)
+    async with aiosqlite.connect(setup_test_db) as db:
+        await db.execute("INSERT INTO subscriptions VALUES (202, 1)")
+        await db.execute("INSERT INTO user_settings (user_id, guild_id, ping_template) VALUES (101, 0, 'Anyone up for a game?')")
+        await db.commit()
+    with patch("cogs.user_cmds.is_lfg_allowed_in_channel", new=AsyncMock(return_value=True)), \
+            patch("cogs.user_cmds.resolve_to_base_game", new=AsyncMock(return_value=(1, "Portal 2"))):
+        await cog.ping_game.callback(cog, interaction, game="Portal 2")
+    call = interaction.channel.send.await_args
+    assert "Hosted by <@101> · Game: **Portal 2**" in call.args[0]
+    assert "<@202>" in call.args[0]
+    assert [user.id for user in call.kwargs["allowed_mentions"].users] == [202]
+
+
+def test_template_tag_positions_alias_and_literal_note_are_preserved():
+    from cogs.user_cmds import render_ping_template
+    message, warning = render_ping_template("{mentions} {game} by {user}: {note}", caller="CALLER",
+        game="GAME", mentions="SUBS", note="literal {caller}")
+    assert message == "SUBS GAME by CALLER: literal {caller}"
+    assert warning == ""
+
+
+# -----------------------------------------------------------------------------
+# Ping body / details / footer layout
+# -----------------------------------------------------------------------------
+
+@pytest.mark.parametrize("note", ["", "Bring snacks"])
+@pytest.mark.parametrize("scheduled_time", ["", "<t:4102444800:R>"])
+@pytest.mark.parametrize("mentions", ["", "<@202> <@203>"])
+@pytest.mark.parametrize("template,attribution", [
+    ("Let's play!", "-# Hosted by <@101> · Game: **Portal 2**"),
+    ("{caller} wants to play {game}!", ""),
+])
+def test_exact_ping_section_layout(template, attribution, note, scheduled_time, mentions):
+    from cogs.user_cmds import render_ping_template
+    actual, _ = render_ping_template(template, caller="<@101>", game="**Portal 2**",
+        mentions=mentions, note=note, scheduled_time=scheduled_time)
+    body = "Let's play!" if attribution else "<@101> wants to play **Portal 2**!"
+    details = []
+    if note:
+        details.append("> Bring snacks")
+    if scheduled_time:
+        details.append("*Starting <t:4102444800:R>*")
+    footer = []
+    if mentions:
+        footer.append("-# <@202> <@203>")
+    if attribution:
+        footer.append(attribution)
+    expected = body
+    if details:
+        expected += "\n\n" + "\n".join(details)
+    if footer:
+        expected += "\n\n" + "\n".join(footer)
+    assert actual == expected
+    assert " · -#" not in actual and "\n\n\n" not in actual
+
+
+def test_explicit_tags_keep_authored_positions_and_optional_whitespace_is_empty():
+    from cogs.user_cmds import render_ping_template
+    template = "{mentions} {game} by {user} at {time}\n{note}"
+    actual, warning = render_ping_template(template, caller="HOST", game="GAME", mentions="PLAYERS",
+        note="NOTE", scheduled_time="TIME")
+    assert actual == "PLAYERS GAME by HOST at TIME\nNOTE"
+    assert warning == ""
+    actual, _ = render_ping_template("{caller} {game} {mentions}", caller="HOST", game="GAME",
+        mentions="PLAYERS", note="   ")
+    assert actual == "HOST GAME PLAYERS"
+
+
+def test_empty_template_has_no_leading_blank_lines_or_stray_subtext():
+    from cogs.user_cmds import render_ping_template, ping_template_fallbacks
+    actual, _ = render_ping_template("", caller="HOST", game="GAME", mentions="")
+    assert actual == "-# Hosted by HOST · Game: GAME"
+    effective, missing = ping_template_fallbacks("Hi!")
+    assert effective == "Hi!\n\n-# {mentions}\n-# Hosted by {caller} · Game: {game}"
+    assert missing == ["{caller}", "{game}", "{mentions}"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("custom", [False, True])
+@pytest.mark.parametrize("has_details", [False, True])
+@pytest.mark.parametrize("has_quiet", [False, True])
+async def test_actual_ping_uses_compact_footer_and_preserves_notifications(
+        setup_test_db, custom, has_details, has_quiet):
+    cog = UserCommands(bot=MagicMock())
+    interaction = make_mock_interaction(user_id=101)
+    async with aiosqlite.connect(setup_test_db) as db:
+        await db.execute("INSERT INTO subscriptions VALUES (203, 1)")
+        if has_quiet:
+            await db.execute("INSERT INTO subscriptions VALUES (202, 1)")
+            await db.execute("INSERT INTO user_settings (user_id, guild_id, quiet_mode) VALUES (202, 0, 1)")
+        if custom:
+            await db.execute("INSERT INTO user_settings (user_id, guild_id, ping_template) VALUES (101, 0, 'Let us play!')")
+        await db.commit()
+    with patch("cogs.user_cmds.is_lfg_allowed_in_channel", new=AsyncMock(return_value=True)), \
+            patch("cogs.user_cmds.resolve_to_base_game", new=AsyncMock(return_value=(1, "Portal 2"))), \
+            patch("cogs.user_cmds.parse_ping_time", return_value=(4102444800, None)):
+        await cog.ping_game.callback(cog, interaction, game="Portal 2",
+            note="Bring snacks" if has_details else None, time="30m" if has_details else None)
+    call = interaction.channel.send.await_args
+    expected = "Let us play!" if custom else "<@101> wants to play **Portal 2**!"
+    if has_details:
+        expected += "\n\n> Bring snacks\n*Starting <t:4102444800:R>*"
+    expected += "\n\n-# <@203>"
+    if custom:
+        expected += "\n-# Hosted by <@101> · Game: **Portal 2**"
+    if has_quiet:
+        expected += "\n-# *<@202> has quiet mode turned on*"
+    assert call.args[0] == expected
+    assert [user.id for user in call.kwargs["allowed_mentions"].users] == [203]
+    assert call.kwargs["allowed_mentions"].roles is False
+    assert call.kwargs["allowed_mentions"].everyone is False
+    assert call.kwargs["silent"] is False
+
+
+@pytest.mark.asyncio
+async def test_quiet_only_footer_has_one_separator(setup_test_db):
+    cog = UserCommands(bot=MagicMock())
+    interaction = make_mock_interaction(user_id=101)
+    async with aiosqlite.connect(setup_test_db) as db:
+        await db.execute("INSERT INTO subscriptions VALUES (202, 1)")
+        await db.execute("INSERT INTO user_settings (user_id, guild_id, quiet_mode) VALUES (202, 0, 1)")
+        await db.commit()
+    with patch("cogs.user_cmds.is_lfg_allowed_in_channel", new=AsyncMock(return_value=True)), \
+            patch("cogs.user_cmds.resolve_to_base_game", new=AsyncMock(return_value=(1, "Portal 2"))):
+        await cog.ping_game.callback(cog, interaction, game="Portal 2")
+    call = interaction.channel.send.await_args
+    assert call.args[0] == "<@101> wants to play **Portal 2**!\n\n-# *<@202> has quiet mode turned on*"
+    assert call.kwargs["allowed_mentions"].users == []

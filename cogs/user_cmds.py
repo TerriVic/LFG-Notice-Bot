@@ -3,16 +3,16 @@ import logging
 import os
 import re
 import time
+from time import time as now_unix
 
 import aiosqlite
-from operations import stats
-import os
-
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from database import DB_PATH, claim_game_ping_cooldown, get_guild_ping_role_ids
+from operations import stats
+from ping_time import parse_ping_time, TIME_PRESETS
 from utils import (
     resolve_to_base_game,
     autocomplete_games,
@@ -25,6 +25,28 @@ from utils import (
     format_command_mention as fmt, build_quickstart_embed
 )
 
+def normalize_ping_footer(message: str) -> str:
+    """One blank line before trailing subtext; no gaps between its lines."""
+    lines = message.rstrip().split("\n")
+    footer = []
+
+    while lines:
+        line = lines[-1]
+
+        if not line.strip():
+            lines.pop()
+        elif line.startswith("-# "):
+            footer.append(lines.pop().rstrip())
+        else:
+            break
+
+    if not footer:
+        return message
+
+    body = "\n".join(lines).rstrip()
+    footer_text = "\n".join(reversed(footer))
+
+    return f"{body}\n\n{footer_text}" if body else footer_text
 
 async def autocomplete_user_subscriptions(interaction: discord.Interaction, current: str):
     clean_current = current.strip().replace("’", "'").replace("‘", "'")
@@ -58,6 +80,24 @@ async def autocomplete_user_subscriptions(interaction: discord.Interaction, curr
         )
         for row in rows
     ]
+
+async def autocomplete_ping_time(_interaction: discord.Interaction, current: str):
+    """Common relative starts and a selectable valid custom expression."""
+    current = current.strip()
+    choices = []
+    if current and len(current) <= 100:
+        try:
+            parse_ping_time(current)
+        except ValueError:
+            pass
+        else:
+            choices.append(app_commands.Choice(name=f"Use entered time: {current}"[:100], value=current))
+    for label, value in TIME_PRESETS:
+        if not current or current.lower() in label.lower() or current.lower() in value:
+            if value != current:
+                choices.append(app_commands.Choice(name=label, value=value))
+    return choices[:25]
+
 
 async def can_user_ping_game(interaction: discord.Interaction) -> tuple[bool, list[int]]:
     """Check server ping-role restrictions, with owner/moderator bypass."""
@@ -111,7 +151,7 @@ def split_ping_message(message: str) -> list[str]:
     parts = []
     length = 0
     user_ids = set()
-    for match in re.finditer(r"<@!?(\d+)>|[\s\S]", message):
+    for match in re.finditer(r"<@!?(\d+)>|<t:\d+(?::[tTdDfFsSR])?>|[\s\S]", message):
         token = match.group(0)
         user_id = int(match.group(1)) if match.group(1) else None
         if (len(prefix) + length + len(token) > 2000
@@ -130,6 +170,90 @@ def split_ping_message(message: str) -> list[str]:
         messages.append(prefix + "".join(parts))
     return messages
 
+
+DEFAULT_PING_TEMPLATE = "{caller} wants to play {game}!"
+
+
+def assemble_ping_sections(message: str, details: list[str], footer: list[str]) -> str:
+    """Separate nonempty sections once; keep lines within each section together."""
+    sections = [message.rstrip(), "\n".join(details), "\n".join(footer)]
+    return "\n\n".join(section for section in sections if section)
+
+
+def ping_template_fallbacks(template: str) -> tuple[str, list[str]]:
+    """Keep authored tags in place; put missing essential tags in the footer."""
+    missing = []
+    attribution = []
+    if "{caller}" not in template and "{user}" not in template:
+        missing.append("{caller}")
+        attribution.append("Hosted by {caller}")
+    if "{game}" not in template:
+        missing.append("{game}")
+        attribution.append("Game: {game}")
+    footer = []
+    if "{mentions}" not in template:
+        missing.append("{mentions}")
+        footer.append("-# {mentions}")
+    if attribution:
+        footer.append("-# " + " · ".join(attribution))
+    return assemble_ping_sections(template, [], footer), missing
+
+
+def render_ping_template(
+        template: str, *,
+        caller: str,
+        game: str,
+        mentions: str,
+        note: str = "",
+        scheduled_time: str = "",
+) -> tuple[str, str]:
+    _, missing = ping_template_fallbacks(template)
+    note = note.strip()
+    replacements = {
+        "caller": caller, "user": caller, "game": game,
+        "mentions": mentions, "note": note, "time": scheduled_time,
+    }
+    # Replace once, preserving literal tags inside inserted notes/game names.
+    message = re.sub(
+        r"\{(caller|user|game|mentions|note|time)}",
+        lambda match: replacements[match.group(1)], template,
+    )
+    details = []
+    if note and "{note}" not in template:
+        details.extend(f"> {line}" for line in note.splitlines())
+    if scheduled_time and "{time}" not in template:
+        details.append(f"*Starting {scheduled_time}*")
+
+    footer = []
+    if "{mentions}" in missing and mentions:
+        footer.append(f"-# {mentions}")
+    attribution = []
+    if "{caller}" in missing:
+        attribution.append(f"Hosted by {caller}")
+    if "{game}" in missing:
+        attribution.append(f"Game: {game}")
+    if attribution:
+        footer.append("-# " + " · ".join(attribution))
+    message = assemble_ping_sections(message, details, footer)
+
+    warning = ""
+    if missing:
+        tags = ", ".join(f"`{tag}`" for tag in missing)
+        fallback_names = {
+            "{caller}": "hosted-by attribution",
+            "{game}": "game name",
+            "{mentions}": "subscriber mentions",
+        }
+        additions = ", ".join(fallback_names[tag] for tag in missing)
+        warning = (
+            f"\n⚠️ Missing tags: {tags}. "
+            f"The bot automatically appends in the footer: {additions}. "
+            "The preview below includes these fallbacks. "
+            "Add the tags to choose their positions; "
+            "`{user}` also counts as `{caller}`. "
+            "Supplied notes and start times appear above the footer when their tags are omitted."
+        )
+    return message, warning
 
 class UserCommands(commands.Cog):
     def __init__(self, bot):
@@ -278,16 +402,18 @@ class UserCommands(commands.Cog):
     @app_commands.command(name="ping_game", description="Ping all users subscribed to a game")
     @app_commands.describe(
         game="The game to ping subscribers for",
-        note="Optional note or extra details"
+        note="Optional note or extra details",
+        time="Optional start: 30m, 2h, Discord <t:...>, or ISO date/time with UTC offset"
     )
     @app_commands.checks.cooldown(1, 30.0)
     @app_commands.guild_only()
-    @app_commands.autocomplete(game=autocomplete_games)
+    @app_commands.autocomplete(game=autocomplete_games, time=autocomplete_ping_time)
     async def ping_game(
             self,
             interaction: discord.Interaction,
             game: str,
-            note: str = None
+            note: str = None,
+            time: str = None,
     ):
         if not interaction.guild:
             await interaction.response.send_message(
@@ -295,6 +421,18 @@ class UserCommands(commands.Cog):
                 ephemeral=True
             )
             return
+
+        # Validate before any database work, cooldown claims, or public pings.
+        rendered_time = None
+        if time is not None:
+            try:
+                start_timestamp, _ = parse_ping_time(time)
+            except ValueError as exc:
+                await interaction.response.send_message(f"❌ Invalid start time: {exc}", ephemeral=True)
+                return
+            # Always show relative time, including for pasted Discord timestamps
+            # originally formatted as a specific date/time style.
+            rendered_time = f"<t:{start_timestamp}:R>"
 
         # 1. Check LFG channel permissions before deferring
         allowed = await is_lfg_allowed_in_channel(
@@ -445,7 +583,7 @@ class UserCommands(commands.Cog):
         )
 
         if not cooldown_allowed:
-            retry_timestamp = int(time.time()) + retry_after
+            retry_timestamp = int(now_unix()) + retry_after
 
             # Remove the private deferred status first.
             await interaction.delete_original_response()
@@ -485,65 +623,53 @@ class UserCommands(commands.Cog):
 
         custom_template = (
             template_row[0]
-            if template_row and template_row[0]
+            if template_row and template_row[0] is not None
             else None
         )
 
-        if custom_template:
-            msg = (
-                custom_template
-                .replace("{caller}", caller_mention)
-                .replace("{user}", caller_mention)
-                .replace("{game}", formatted_game)
-                .replace("{mentions}", all_mentions)
-                .replace("{note}", clean_note)
-            )
+        msg, _ = render_ping_template(
+            custom_template if custom_template is not None else DEFAULT_PING_TEMPLATE,
+            caller=caller_mention, game=formatted_game,
+            mentions=all_mentions, note=clean_note, scheduled_time=rendered_time or "",
+        )
 
-            # Make sure an entered note isn't silently lost if the user's
-            # template doesn't contain {note}.
-            if clean_note and clean_note not in msg:
-                msg += f"\n> {clean_note}"
-
-            # Make sure subscribers remain represented even if the user's
-            # template does not contain {mentions}.
-            if all_mentions and all_mentions not in msg:
-                msg += f"\n{all_mentions}"
-
-        else:
-            msg = (
-                f"{caller_mention} wants to play "
-                f"{formatted_game}! {all_mentions}"
-            )
-
-            if clean_note:
-                msg += f"\n> {clean_note}"
-
-        # Quiet users are plain display names, never notification mentions.
+        # Quiet users stay clickable; AllowedMentions excludes them from notifications.
         if quiet_user_ids:
-            quiet_names = ", ".join(plain_user_name(uid) for uid in quiet_user_ids)
+            quiet_names = ", ".join(f"<@{uid}>" for uid in quiet_user_ids)
             verb = "has" if len(quiet_user_ids) == 1 else "have"
-            msg += f"\n\n-# {quiet_names} {verb} quiet mode turned on"
+            msg += f"\n\n-# *{quiet_names} {verb} quiet mode turned on*"
 
         # Sanitize the complete text before splitting, so long display names
         # cannot overflow batches and each active subscriber is pinged only once.
         active_ids = set(active_user_ids)
+        quiet_ids = set(quiet_user_ids)
         seen_ids = set()
 
         def eligible_mention(match):
             uid = int(match.group(1))
+            # Keep caller and quiet subscribers clickable without notifying them.
+            # Only active subscriber IDs are allowed to produce pings.
+            if uid == interaction.user.id or uid in quiet_ids:
+                return match.group(0)
             if uid in active_ids and uid not in seen_ids:
                 seen_ids.add(uid)
                 return match.group(0)
             return plain_user_name(uid)
 
         msg = re.sub(r"<@!?(\d+)>", eligible_mention, msg)
-        allowed_mentions = discord.AllowedMentions(
-            users=True, roles=False, everyone=False, replied_user=False
-        )
+        msg = normalize_ping_footer(msg)
         for message in split_ping_message(msg):
+            # A mention in the text does not itself have to trigger a ping.
+            # Whitelist only actual subscribers present in THIS batch; the
+            # caller is excluded even if subscribed to their own game.
             expected_ids = {
                 int(uid) for uid in re.findall(r"<@!?(\d+)>", message)
+                if int(uid) in active_ids
             }
+            allowed_mentions = discord.AllowedMentions(
+                users=[discord.Object(id=uid) for uid in sorted(expected_ids)],
+                roles=False, everyone=False, replied_user=False
+            )
             sent = await interaction.channel.send(
                 message, allowed_mentions=allowed_mentions, silent=False
             )
@@ -566,19 +692,15 @@ class UserCommands(commands.Cog):
                 "Could not remove completed ping command status", exc_info=True
             )
 
-    @app_commands.command(name="set_ping_template", description="Customize how your /ping_game calls look")
-    @app_commands.describe(template="Your custom message. Placeholders: {caller}, {game}, {mentions}, {note}")
+    @app_commands.command(name="set_ping_template", description="Customize pings; missing {caller}, {game}, {mentions} are appended automatically")
+    @app_commands.describe(template="Tags: {caller}/{user}, {game}, {mentions}, {note}, {time}. Missing caller/game/mentions auto-append")
     async def set_ping_template(self, interaction: discord.Interaction, template: str):
         if len(template) > 300:
             await interaction.response.send_message("Template is too long! Please keep it under 300 characters.", ephemeral=True)
             return
 
+        # Store the authored template so every later preview can explain fallbacks.
         final_template = template
-        warning = ""
-        if "{mentions}" not in template:
-            final_template += "\n{mentions}"
-            warning = "\n*(Note: `{mentions}` was appended automatically so subscribers receive the ping notification.)*"
-
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 """
@@ -590,24 +712,17 @@ class UserCommands(commands.Cog):
             )
             await db.commit()
 
-
-        # Dummy mentions for template preview
-        mock_caller = interaction.user.mention
-        mock_mentions = "<@123456789012345678>"
-
-        preview = (
-            template
-            .replace("{caller}", mock_caller)
-            .replace("{user}", interaction.user.mention)
-            .replace("{game}", "**Wardogs**")
-            .replace("{mentions}", mock_mentions)
-            .replace("{note}", "Looking for 2 more!")
+        preview, warning = render_ping_template(
+            template, caller=interaction.user.mention, game="**[game]**",
+            mentions="[mentions]", note="[note]",
+            scheduled_time=f"<t:{int(time.time()) + 7200}:R>",
         )
 
         await interaction.response.send_message(
             f"✅ **Custom ping template saved!**{warning}\n\n"
-            f"**Preview:**\n{preview}",
-            ephemeral=True
+            "**Preview:** *(example note and start time; both optional)*\n"
+            f"{preview}",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
         )
 
     @app_commands.command(name="view_ping_template", description="View your current custom ping template setting")
@@ -619,31 +734,34 @@ class UserCommands(commands.Cog):
             ) as cursor:
                 row = await cursor.fetchone()
 
-        if not row or not row[0]:
+        if not row or row[0] is None:
+            preview, _ = render_ping_template(
+                DEFAULT_PING_TEMPLATE, caller=interaction.user.mention,
+                game="**[game]**", mentions="[mentions]",
+                note="[note]",
+                scheduled_time=f"<t:{int(time.time()) + 7200}:R>",
+            )
             await interaction.response.send_message(
-                "You are currently using the **default ping format**:\n"
-                "`<caller> wants to play <game>! <mentions> <note>`",
-                ephemeral=True
+                "You are currently using the **default ping format**.\n\n"
+                "**Preview:** *(example note and start time; both optional)*\n"
+                f"{preview}",
+                ephemeral=True, allowed_mentions=discord.AllowedMentions.none(),
             )
             return
 
         template = row[0]
 
-        mock_caller = interaction.user.mention
-        mock_mentions = "<@123456789012345678>"
-        preview = (
-            template
-            .replace("{caller}", mock_caller)
-            .replace("{user}", interaction.user.mention)
-            .replace("{game}", "**Wardogs**")
-            .replace("{mentions}", mock_mentions)
-            .replace("{note}", "Looking for 2 more!")
+        preview, warning = render_ping_template(
+            template, caller=interaction.user.mention, game="**[game]**",
+            mentions="[mentions]", note="[note]",
+            scheduled_time=f"<t:{int(time.time()) + 7200}:R>",
         )
 
         await interaction.response.send_message(
-            f"**Your Current Custom Template:**\n```{template}```\n"
-            f"**Preview:**\n{preview}",
-            ephemeral=True
+            f"**Your Current Custom Template:**\n```{template}```{warning}\n\n"
+            "**Preview:** *(example note and start time; both optional)*\n"
+            f"{preview}",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
         )
 
     @app_commands.command(name="reset_ping_template", description="Reset your ping template back to default")
@@ -1107,10 +1225,10 @@ class UserCommands(commands.Cog):
         embed.add_field(
             name="Server Activity & Social",
             value=(
-                f"• {fmt(self.bot, 'ping_game')} `<game>` `[note]` — Send an LFG ping mentioning subscribers.\n"
+                f"• {fmt(self.bot, 'ping_game')} `<game>` `[note]` `[time]` — Ping subscribers; optional relative start time.\n"
                 f"• {fmt(self.bot, 'quiet_mode')} `[enabled]` `[scope]` — Toggle or set quiet mode notifications globally or per-server.\n"
-                f"• {fmt(self.bot, 'set_ping_template')} `<template>` — Set custom template for `/ping_game` notifications.\n"
-                f"• {fmt(self.bot, 'view_ping_template')} — View your saved custom ping format.\n"
+                f"• {fmt(self.bot, 'set_ping_template')} `<template>` — Customize tag positions (`{{user}}` = `{{caller}}`).\n"
+                f"• {fmt(self.bot, 'view_ping_template')} — Preview pings and missing-tag fallbacks.\n"
                 f"• {fmt(self.bot, 'reset_ping_template')} — Reset ping template to default.\n"
                 f"• {fmt(self.bot, 'set_subscribed_indicator')} `<indicator>` — Set custom icon for subscribed games in autocomplete.\n"
                 f"• {fmt(self.bot, 'view_subscribed_indicator')} — View saved autocomplete indicator.\n"
@@ -1119,6 +1237,17 @@ class UserCommands(commands.Cog):
                 f"• {fmt(self.bot, 'show_subscribers')} `<game>` — List subscribers for a game."
             ),
             inline=False
+        )
+
+        embed.add_field(
+            name="Ping Layout",
+            value=(
+                "Omitted `{note}` and `{time}` tags use a details block below the message "
+                "when values are supplied. Missing `{mentions}`, `{caller}` and `{game}` "
+                "use a compact footer. Included tags stay where you place them. "
+                "Previews warn about missing essential tags."
+            ),
+            inline=False,
         )
 
         embed.add_field(
