@@ -79,6 +79,14 @@ Only the moderator who opened the wizard can use it while retaining permission. 
 
 Unconfigured servers block `/ping_game` until a moderator enables channels through the wizard or `/config set_lfg_channels`. Existing saved configurations, including explicit allow-all settings, are retained. The individual configuration commands remain available for later adjustments.
 
+### Custom ping templates and automatic fallbacks
+
+Use `/set_ping_template` to choose where `{caller}`, `{game}` and `{mentions}` appear. `{user}` is an alias for `{caller}`; `{note}` and `{time}` are optional.
+
+Missing essential tags do not prevent saving. The bot appends a `Hosted by @caller` attribution when `{caller}` (or `{user}`) is missing, `Game: **game name**` when `{game}` is missing, and subscriber mentions when `{mentions}` is missing. When both caller and game are missing, they share one short line. Tags that are present retain their chosen positions.
+
+Both the save confirmation and `/view_ping_template` explicitly warn which essential tags are missing and show the complete preview **with the fallbacks included**. Your authored template is preserved, so later previews still explain those additions. Older templates receive the same protection when rendered. Preview messages never notify mentioned users. Optional entered notes and start times are appended when their tags are omitted.
+
 ### Scheduling a game with `/ping_game`
 
 The optional `time` argument lets you announce sessions in advance without delaying the ping: notifications **still go out immediately**, and the bot includes the planned start time in the message. The `time` field autocompletes common durations (`15m`, `30m`, `1h`, `1h 30m`, `2h`, etc.); custom entries work too.
