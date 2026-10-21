@@ -1466,7 +1466,7 @@ async def test_legacy_ping_template_gets_attribution_game_and_mentions(setup_tes
             patch("cogs.user_cmds.resolve_to_base_game", new=AsyncMock(return_value=(1, "Portal 2"))):
         await cog.ping_game.callback(cog, interaction, game="Portal 2")
     call = interaction.channel.send.await_args
-    assert "Hosted by <@101> · Game: **Portal 2**" in call.args[0]
+    assert "-# Hosted by <@101> · Game: **Portal 2**" in call.args[0]
     assert "<@202>" in call.args[0]
     assert [user.id for user in call.kwargs["allowed_mentions"].users] == [202]
 
@@ -1502,7 +1502,7 @@ def test_exact_ping_section_layout(template, attribution, note, scheduled_time, 
         details.append("*Starting <t:4102444800:R>*")
     footer = []
     if mentions:
-        footer.append("-# <@202> <@203>")
+        footer.append("-# Subscribers: <@202> <@203>")
     if attribution:
         footer.append(attribution)
     expected = body
@@ -1531,7 +1531,7 @@ def test_empty_template_has_no_leading_blank_lines_or_stray_subtext():
     actual, _ = render_ping_template("", caller="HOST", game="GAME", mentions="")
     assert actual == "-# Hosted by HOST · Game: GAME"
     effective, missing = ping_template_fallbacks("Hi!")
-    assert effective == "Hi!\n\n-# {mentions}\n-# Hosted by {caller} · Game: {game}"
+    assert effective == "Hi!\n\n-# Subscribers: {mentions}\n-# Hosted by {caller} · Game: {game}"
     assert missing == ["{caller}", "{game}", "{mentions}"]
 
 
@@ -1560,7 +1560,7 @@ async def test_actual_ping_uses_compact_footer_and_preserves_notifications(
     expected = "Let us play!" if custom else "<@101> wants to play **Portal 2**!"
     if has_details:
         expected += "\n\n> Bring snacks\n*Starting <t:4102444800:R>*"
-    expected += "\n\n-# <@203>"
+    expected += "\n\n-# Subscribers: <@203>"
     if custom:
         expected += "\n-# Hosted by <@101> · Game: **Portal 2**"
     if has_quiet:
