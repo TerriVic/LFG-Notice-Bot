@@ -193,7 +193,7 @@ def ping_template_fallbacks(template: str) -> tuple[str, list[str]]:
     footer = []
     if "{mentions}" not in template:
         missing.append("{mentions}")
-        footer.append("-# {mentions}")
+        footer.append("-# Subscribers: {mentions}")
     if attribution:
         footer.append("-# " + " · ".join(attribution))
     return assemble_ping_sections(template, [], footer), missing
@@ -226,7 +226,7 @@ def render_ping_template(
 
     footer = []
     if "{mentions}" in missing and mentions:
-        footer.append(f"-# {mentions}")
+        footer.append(f"-# Subscribers: {mentions}")
     attribution = []
     if "{caller}" in missing:
         attribution.append(f"Hosted by {caller}")

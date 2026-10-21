@@ -1531,7 +1531,7 @@ def test_empty_template_has_no_leading_blank_lines_or_stray_subtext():
     actual, _ = render_ping_template("", caller="HOST", game="GAME", mentions="")
     assert actual == "-# Hosted by HOST · Game: GAME"
     effective, missing = ping_template_fallbacks("Hi!")
-    assert effective == "Hi!\n\n-# {mentions}\n-# Hosted by {caller} · Game: {game}"
+    assert effective == "Hi!\n\n-# Subscribers: {mentions}\n-# Hosted by {caller} · Game: {game}"
     assert missing == ["{caller}", "{game}", "{mentions}"]
 
 
