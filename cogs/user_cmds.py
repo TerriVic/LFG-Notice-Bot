@@ -359,6 +359,7 @@ class UserCommands(commands.Cog):
             raw_id, raw_name = result
 
         game_id, official_name = await resolve_to_base_game(raw_id, raw_name)
+        formatted_name = await game_mention(game_id, official_name, DB_PATH)
 
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
@@ -366,7 +367,7 @@ class UserCommands(commands.Cog):
                     (interaction.user.id, game_id)
             ) as cursor:
                 if await cursor.fetchone():
-                    await interaction.followup.send(f"You are already subscribed to **{official_name}**!", ephemeral=True)
+                    await interaction.followup.send(f"You are already subscribed to {formatted_name}!", ephemeral=True)
                     return
 
             await db.execute(
@@ -375,7 +376,7 @@ class UserCommands(commands.Cog):
             )
             await db.commit()
 
-        await interaction.followup.send(f"You subscribed to **{official_name}**!", ephemeral=True)
+        await interaction.followup.send(f"You subscribed to {formatted_name}!", ephemeral=True)
 
     @app_commands.command(name="unsubscribe", description="Unsubscribe from a game")
     @app_commands.autocomplete(game=autocomplete_user_subscriptions)
@@ -401,6 +402,7 @@ class UserCommands(commands.Cog):
             return
 
         game_id, official_name = await resolve_to_base_game(row[0], row[1])
+        formatted_name = await game_mention(game_id, official_name, DB_PATH)
 
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
@@ -409,7 +411,7 @@ class UserCommands(commands.Cog):
             )
             await db.commit()
 
-        await interaction.followup.send(f"You unsubscribed from **{official_name}**", ephemeral=True)
+        await interaction.followup.send(f"You unsubscribed from {formatted_name}", ephemeral=True)
 
     @app_commands.command(name="ping_game", description="Ping all users subscribed to a game")
     @app_commands.describe(
@@ -573,9 +575,10 @@ class UserCommands(commands.Cog):
             if interaction.guild.get_member(row[0]) is not None
         ]
 
+        formatted_name = await game_mention(game_id, official_name, DB_PATH)
+
         # No actual recipients -> private failure message
         if not rows:
-            formatted_name = await game_mention(game_id, official_name, DB_PATH)
             await interaction.delete_original_response()
 
             await interaction.followup.send(
@@ -603,7 +606,7 @@ class UserCommands(commands.Cog):
 
             # Report the cooldown privately.
             await interaction.followup.send(
-                f"⏳ **{official_name}** was pinged recently. "
+                f"⏳ {formatted_name} was pinged recently. "
                 f"It can be pinged again <t:{retry_timestamp}:R>.",
                 ephemeral=True
             )
@@ -865,25 +868,26 @@ class UserCommands(commands.Cog):
             raw_id, raw_name = result
 
         game_id, official_name = await resolve_to_base_game(raw_id, raw_name)
+        formatted_name = await game_mention(game_id, official_name, DB_PATH)
 
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
                 users = await cursor.fetchall()
 
         if not users:
-            await interaction.followup.send(f"No subscribers for **{official_name}**.", ephemeral=not public)
+            await interaction.followup.send(f"No subscribers for {formatted_name}.", ephemeral=not public)
             return
 
         local_mentions = [f"<@{u[0]}>" for u in users if interaction.guild.get_member(u[0])]
         if not local_mentions:
             await interaction.followup.send(
-                f"No users in **{interaction.guild.name}** are subscribed to **{official_name}**.",
+                f"No users in **{interaction.guild.name}** are subscribed to {formatted_name}.",
                 ephemeral=not public
             )
             return
 
         await interaction.followup.send(
-            f"Players in this server interested in **{official_name}** ({len(local_mentions)}):\n{' '.join(local_mentions)}",
+            f"Players in this server interested in {formatted_name} ({len(local_mentions)}):\n{' '.join(local_mentions)}",
             ephemeral=not public,
             allowed_mentions=discord.AllowedMentions.none()
         )

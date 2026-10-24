@@ -98,6 +98,7 @@ def make_mock_interaction(user_id=12345, guild_id=999, channel_id=888):
 # 1. Tests for Subscribing & Unsubscribing
 # -----------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("mock_game_mention_fallback")
 @pytest.mark.asyncio
 async def test_subscribe_command_success(setup_test_db):
     """Test subscribing to an existing cached game."""
@@ -122,6 +123,7 @@ async def test_subscribe_command_success(setup_test_db):
     assert row[1] == 1
 
 
+@pytest.mark.usefixtures("mock_game_mention_fallback")
 @pytest.mark.asyncio
 async def test_subscribe_already_subscribed(setup_test_db):
     """Test subscribing when user is already subscribed."""
@@ -198,6 +200,7 @@ async def test_subscribe_game_fetched_from_igdb(mock_fetch_cache, setup_test_db)
     # which executes 'raw_id, raw_name = result' and proceeds to the next steps.
     mock_fetch_cache.assert_awaited_once()
 
+@pytest.mark.usefixtures("mock_game_mention_fallback")
 @pytest.mark.asyncio
 async def test_unsubscribe_command_success(setup_test_db):
     """Test unsubscribing from a game."""
@@ -330,6 +333,7 @@ async def test_ping_game_rejects_user_without_allowed_role(setup_test_db):
     assert "<@&777>" in msg
 
 
+@pytest.mark.usefixtures("mock_game_mention_fallback")
 @pytest.mark.asyncio
 async def test_ping_game_blocked_by_server_game_cooldown(setup_test_db):
     cog = UserCommands(bot=MagicMock())
@@ -904,6 +908,7 @@ async def test_show_subscribers_no_guild(setup_test_db):
     )
 
 
+@pytest.mark.usefixtures("mock_game_mention_fallback")
 @pytest.mark.asyncio
 async def test_show_subscribers_success(setup_test_db):
     """Test show_subscribers successfully finds and displays guild members subscribed to a game."""
@@ -1645,3 +1650,55 @@ async def test_ping_game_native_discord_game_tag(setup_test_db):
     assert "<@202>" in msg
     allowed = interaction.channel.send.await_args.kwargs["allowed_mentions"]
     assert [user.id for user in allowed.users] == [202]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command_name", ["subscribe", "unsubscribe", "show_subscribers"])
+async def test_commands_use_native_game_mentions(setup_test_db, command_name):
+    """Commands with game_mention() must display native tags when available."""
+    cog = UserCommands(bot=MagicMock())
+    interaction = make_mock_interaction(user_id=101)
+    interaction.guild.get_member = lambda uid: MagicMock(id=uid) if uid == 202 else None
+    async with aiosqlite.connect(setup_test_db) as db:
+        await db.execute(
+            "UPDATE igdb_games SET discord_game_id = ? WHERE id = 1",
+            ("1276737795012165766",),
+        )
+        if command_name != "subscribe":
+            await db.execute("INSERT INTO subscriptions (user_id, game_id) VALUES (?, ?)",
+                             (101 if command_name == "unsubscribe" else 202, 1))
+        await db.commit()
+
+    with patch("cogs.user_cmds.resolve_to_base_game",
+               new=AsyncMock(return_value=(1, "Portal 2"))):
+        if command_name == "subscribe":
+            await cog.subscribe.callback(cog, interaction, game="Portal 2")
+        elif command_name == "unsubscribe":
+            await cog.unsubscribe.callback(cog, interaction, game="Portal 2")
+        else:
+            await cog.show_subscribers.callback(cog, interaction, game="Portal 2", public=False)
+
+    message = interaction.followup.send.await_args.args[0]
+    assert "<@$1276737795012165766>" in message
+    assert "**Portal 2**" not in message
+
+
+@pytest.mark.asyncio
+async def test_game_info_displays_native_game_mention(setup_test_db):
+    """Game info keeps the readable title and adds a native tag in its mention field."""
+    interaction = make_mock_interaction(user_id=101)
+    details = {"id": 1, "name": "Portal 2", "summary": "Puzzle game"}
+    async with aiosqlite.connect(setup_test_db) as db:
+        await db.execute("UPDATE igdb_games SET discord_game_id = ? WHERE id = 1",
+                         ("1276737795012165766",))
+        await db.commit()
+    with patch("cogs.user_cmds.fetch_game_details_from_igdb",
+               new=AsyncMock(return_value=details)), \
+         patch("cogs.user_cmds.resolve_to_base_game",
+               new=AsyncMock(return_value=(1, "Portal 2"))):
+        cog = UserCommands(bot=MagicMock())
+        await cog.game_info.callback(cog, interaction, game="Portal 2", public=False)
+    embed = interaction.followup.send.await_args.kwargs["embed"]
+    assert embed.title == "Portal 2"
+    assert next(field.value for field in embed.fields
+                if field.name == "🎩 Discord Mention") == "<@$1276737795012165766>"
