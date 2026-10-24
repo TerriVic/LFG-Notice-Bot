@@ -40,6 +40,20 @@ async def setup_test_db(tmp_path, monkeypatch):
     return test_db_path
 
 
+@pytest.fixture
+def mock_game_mention_fallback():
+    """Keep ping-layout tests independent of cached Discord game IDs and API lookups.
+
+    Native game tags are tested separately by test_ping_game_native_discord_game_tag
+    and Tests/test_discord_game_mentions.py.
+    """
+    async def fallback(igdb_id, name, db_path):
+        return f"**{discord.utils.escape_markdown(discord.utils.escape_mentions(name))}**"
+
+    with patch("cogs.user_cmds.game_mention", new=fallback):
+        yield
+
+
 def make_mock_interaction(user_id=12345, guild_id=999, channel_id=888):
     """Creates a mock discord.Interaction with standard attributes."""
     interaction = AsyncMock(spec=discord.Interaction)
@@ -360,6 +374,7 @@ async def test_ping_game_disallowed_channel(setup_test_db):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_failure", [False, True], ids=["status-deleted", "status-delete-failed"])
+@pytest.mark.usefixtures("mock_game_mention_fallback")
 async def test_ping_game_success(setup_test_db, cleanup_failure):
     """Test pinging game subscribers when LFG channel is allowed."""
     cog = UserCommands(bot=MagicMock())
@@ -428,6 +443,7 @@ async def test_ping_game_game_not_found(mock_lfg_allowed, setup_test_db):
 @pytest.mark.asyncio
 @patch("cogs.user_cmds.is_lfg_allowed_in_channel", new_callable=AsyncMock)
 @patch("cogs.user_cmds.resolve_to_base_game", new_callable=AsyncMock)
+@pytest.mark.usefixtures("mock_game_mention_fallback")
 async def test_ping_game_with_custom_template(mock_resolve, mock_lfg_allowed, setup_test_db):
     """Test ping_game command utilizing a user's custom ping template."""
 
@@ -1215,6 +1231,7 @@ def test_split_ping_message_preserves_content_and_mentions(message):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("partial_failure", [False, True], ids=["complete", "partial-failure"])
+@pytest.mark.usefixtures("mock_game_mention_fallback")
 async def test_ping_game_many_batches_preserves_quiet_mode_and_notifies_once(monkeypatch, partial_failure):
     from operations import OperationalStats
     counters = OperationalStats()
@@ -1337,6 +1354,7 @@ async def test_ping_game_scheduled_always_relative(setup_test_db, source):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("mock_game_mention_fallback")
 async def test_ping_game_custom_template_has_explicit_time_placeholder(setup_test_db):
     cog = UserCommands(bot=MagicMock())
     interaction = make_mock_interaction(user_id=101)
@@ -1455,6 +1473,7 @@ async def test_template_save_and_view_show_same_fallbacks(setup_test_db, templat
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("mock_game_mention_fallback")
 async def test_legacy_ping_template_gets_attribution_game_and_mentions(setup_test_db):
     cog = UserCommands(bot=MagicMock())
     interaction = make_mock_interaction(user_id=101)
@@ -1498,20 +1517,34 @@ def test_exact_ping_section_layout(template, attribution, note, scheduled_time, 
     details = []
     if note:
         details.append("> Bring snacks")
-    if scheduled_time:
+    if scheduled_time and attribution:
         details.append("*Starting <t:4102444800:R>*")
     footer = []
+    if scheduled_time and not attribution:
+        footer.append("-# Starting <t:4102444800:R>")
     if mentions:
         footer.append("-# Subscribers: <@202> <@203>")
     if attribution:
         footer.append(attribution)
     expected = body
-    if details:
-        expected += "\n\n" + "\n".join(details)
-    if footer:
-        expected += "\n\n" + "\n".join(footer)
+    if not attribution and details and footer:
+        expected += "\n\n" + "\n".join(details) + "\n\n" + "\n".join(footer)
+    elif details or footer:
+        expected += "\n\n" + "\n".join(details + footer)
     assert actual == expected
     assert " · -#" not in actual and "\n\n\n" not in actual
+
+
+def test_default_time_and_subscribers_share_compact_subtext_block():
+    from cogs.user_cmds import DEFAULT_PING_TEMPLATE, render_ping_template
+    message, _ = render_ping_template(
+        DEFAULT_PING_TEMPLATE, caller="HOST", game="GAME", mentions="SUBS",
+        scheduled_time="<t:4102444800:R>",
+    )
+    assert message == (
+        "HOST wants to play GAME!\n\n"
+        "-# Starting <t:4102444800:R>\n-# Subscribers: SUBS"
+    )
 
 
 def test_explicit_tags_keep_authored_positions_and_optional_whitespace_is_empty():
@@ -1539,6 +1572,7 @@ def test_empty_template_has_no_leading_blank_lines_or_stray_subtext():
 @pytest.mark.parametrize("custom", [False, True])
 @pytest.mark.parametrize("has_details", [False, True])
 @pytest.mark.parametrize("has_quiet", [False, True])
+@pytest.mark.usefixtures("mock_game_mention_fallback")
 async def test_actual_ping_uses_compact_footer_and_preserves_notifications(
         setup_test_db, custom, has_details, has_quiet):
     cog = UserCommands(bot=MagicMock())
@@ -1559,8 +1593,13 @@ async def test_actual_ping_uses_compact_footer_and_preserves_notifications(
     call = interaction.channel.send.await_args
     expected = "Let us play!" if custom else "<@101> wants to play **Portal 2**!"
     if has_details:
-        expected += "\n\n> Bring snacks\n*Starting <t:4102444800:R>*"
-    expected += "\n\n-# Subscribers: <@203>"
+        expected += "\n\n> Bring snacks"
+        if custom:
+            expected += "\n*Starting <t:4102444800:R>*"
+    expected += "\n\n"
+    if has_details and not custom:
+        expected += "-# Starting <t:4102444800:R>\n"
+    expected += "-# Subscribers: <@203>"
     if custom:
         expected += "\n-# Hosted by <@101> · Game: **Portal 2**"
     if has_quiet:
@@ -1573,6 +1612,7 @@ async def test_actual_ping_uses_compact_footer_and_preserves_notifications(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("mock_game_mention_fallback")
 async def test_quiet_only_footer_has_one_separator(setup_test_db):
     cog = UserCommands(bot=MagicMock())
     interaction = make_mock_interaction(user_id=101)
@@ -1586,3 +1626,22 @@ async def test_quiet_only_footer_has_one_separator(setup_test_db):
     call = interaction.channel.send.await_args
     assert call.args[0] == "<@101> wants to play **Portal 2**!\n\n-# *<@202> has quiet mode turned on*"
     assert call.kwargs["allowed_mentions"].users == []
+
+
+@pytest.mark.asyncio
+async def test_ping_game_native_discord_game_tag(setup_test_db):
+    cog = UserCommands(bot=MagicMock())
+    interaction = make_mock_interaction(user_id=101)
+    interaction.guild.get_member = lambda uid: MagicMock(id=uid, display_name="Player")
+    async with aiosqlite.connect(setup_test_db) as db:
+        await db.execute("INSERT INTO subscriptions (user_id, game_id) VALUES (202, 1)")
+        await db.execute("UPDATE igdb_games SET discord_game_id = ? WHERE id = 1", ("1276737795012165766",))
+        await db.commit()
+    with patch("cogs.user_cmds.is_lfg_allowed_in_channel", new=AsyncMock(return_value=True)), \
+         patch("cogs.user_cmds.resolve_to_base_game", new=AsyncMock(return_value=(1, "Portal 2"))):
+        await cog.ping_game.callback(cog, interaction, game="Portal 2")
+    msg = interaction.channel.send.await_args.args[0]
+    assert "<@$1276737795012165766>" in msg
+    assert "<@202>" in msg
+    allowed = interaction.channel.send.await_args.kwargs["allowed_mentions"]
+    assert [user.id for user in allowed.users] == [202]

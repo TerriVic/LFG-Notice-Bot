@@ -38,7 +38,8 @@ async def init_db():
                                                                    parent_game_id INTEGER DEFAULT NULL,
                                                                    version_parent_id INTEGER DEFAULT NULL,
                                                                    is_multiplayer INTEGER DEFAULT 0,
-                                                                   total_rating_count INTEGER DEFAULT 0
+                                                                   total_rating_count INTEGER DEFAULT 0,
+                                                                   discord_game_id TEXT DEFAULT NULL
                          );
                          """)
 
@@ -170,7 +171,8 @@ async def init_db():
             "is_multiplayer": "INTEGER DEFAULT 0",
             "parent_game_id": "INTEGER DEFAULT NULL",
             "version_parent_id": "INTEGER DEFAULT NULL",
-            "total_rating_count": "INTEGER DEFAULT 0"
+            "total_rating_count": "INTEGER DEFAULT 0",
+            "discord_game_id": "TEXT DEFAULT NULL"
         })
 
         await ensure_columns(db, "guild_lfg_settings", {
