@@ -11,6 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from database import DB_PATH, claim_game_ping_cooldown, get_guild_ping_role_ids
+from discord_game_mentions import game_mention
 from operations import stats
 from ping_time import parse_ping_time, TIME_PRESETS
 from utils import (
@@ -176,7 +177,9 @@ DEFAULT_PING_TEMPLATE = "{caller} wants to play {game}!"
 
 def assemble_ping_sections(message: str, details: list[str], footer: list[str]) -> str:
     """Separate nonempty sections once; keep lines within each section together."""
-    sections = [message.rstrip(), "\n".join(details), "\n".join(footer)]
+    # Notes, scheduled time, and generated footer belong to one compact block.
+    # Keep one blank line between the invitation and that block.
+    sections = [message.rstrip(), "\n".join([*details, *footer])]
     return "\n\n".join(section for section in sections if section)
 
 
@@ -221,10 +224,15 @@ def render_ping_template(
     details = []
     if note and "{note}" not in template:
         details.extend(f"> {line}" for line in note.splitlines())
-    if scheduled_time and "{time}" not in template:
+    # Default pings put start time in the same small-text metadata block
+    # as subscribers; custom templates retain their previous layout.
+    default_layout = template == DEFAULT_PING_TEMPLATE
+    if scheduled_time and "{time}" not in template and not default_layout:
         details.append(f"*Starting {scheduled_time}*")
 
     footer = []
+    if scheduled_time and default_layout:
+        footer.append(f"-# Starting {scheduled_time}")
     if "{mentions}" in missing and mentions:
         footer.append(f"-# Subscribers: {mentions}")
     attribution = []
@@ -234,7 +242,11 @@ def render_ping_template(
         attribution.append(f"Game: {game}")
     if attribution:
         footer.append("-# " + " · ".join(attribution))
-    message = assemble_ping_sections(message, details, footer)
+    if default_layout and details and footer:
+        # The quoted note is its own section; the metadata is a compact block.
+        message = "\n\n".join([message.rstrip(), "\n".join(details), "\n".join(footer)])
+    else:
+        message = assemble_ping_sections(message, details, footer)
 
     warning = ""
     if missing:
@@ -347,6 +359,7 @@ class UserCommands(commands.Cog):
             raw_id, raw_name = result
 
         game_id, official_name = await resolve_to_base_game(raw_id, raw_name)
+        formatted_name = await game_mention(game_id, official_name, DB_PATH)
 
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
@@ -354,7 +367,7 @@ class UserCommands(commands.Cog):
                     (interaction.user.id, game_id)
             ) as cursor:
                 if await cursor.fetchone():
-                    await interaction.followup.send(f"You are already subscribed to **{official_name}**!", ephemeral=True)
+                    await interaction.followup.send(f"You are already subscribed to {formatted_name}!", ephemeral=True)
                     return
 
             await db.execute(
@@ -363,7 +376,7 @@ class UserCommands(commands.Cog):
             )
             await db.commit()
 
-        await interaction.followup.send(f"You subscribed to **{official_name}**!", ephemeral=True)
+        await interaction.followup.send(f"You subscribed to {formatted_name}!", ephemeral=True)
 
     @app_commands.command(name="unsubscribe", description="Unsubscribe from a game")
     @app_commands.autocomplete(game=autocomplete_user_subscriptions)
@@ -389,6 +402,7 @@ class UserCommands(commands.Cog):
             return
 
         game_id, official_name = await resolve_to_base_game(row[0], row[1])
+        formatted_name = await game_mention(game_id, official_name, DB_PATH)
 
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
@@ -397,7 +411,7 @@ class UserCommands(commands.Cog):
             )
             await db.commit()
 
-        await interaction.followup.send(f"You unsubscribed from **{official_name}**", ephemeral=True)
+        await interaction.followup.send(f"You unsubscribed from {formatted_name}", ephemeral=True)
 
     @app_commands.command(name="ping_game", description="Ping all users subscribed to a game")
     @app_commands.describe(
@@ -561,13 +575,15 @@ class UserCommands(commands.Cog):
             if interaction.guild.get_member(row[0]) is not None
         ]
 
+        formatted_name = await game_mention(game_id, official_name, DB_PATH)
+
         # No actual recipients -> private failure message
         if not rows:
             await interaction.delete_original_response()
 
             await interaction.followup.send(
                 f"No other subscribers in this server to ping for "
-                f"**{official_name}**.",
+                f"{formatted_name}.",
                 ephemeral=True
             )
             return
@@ -590,7 +606,7 @@ class UserCommands(commands.Cog):
 
             # Report the cooldown privately.
             await interaction.followup.send(
-                f"⏳ **{official_name}** was pinged recently. "
+                f"⏳ {formatted_name} was pinged recently. "
                 f"It can be pinged again <t:{retry_timestamp}:R>.",
                 ephemeral=True
             )
@@ -618,7 +634,7 @@ class UserCommands(commands.Cog):
             return discord.utils.escape_mentions(discord.utils.escape_markdown(name))
 
         caller_mention = interaction.user.mention
-        formatted_game = f"**{official_name}**"
+        formatted_game = await game_mention(game_id, official_name, DB_PATH)
         clean_note = note.strip() if note else ""
 
         custom_template = (
@@ -637,7 +653,9 @@ class UserCommands(commands.Cog):
         if quiet_user_ids:
             quiet_names = ", ".join(f"<@{uid}>" for uid in quiet_user_ids)
             verb = "has" if len(quiet_user_ids) == 1 else "have"
-            msg += f"\n\n-# *{quiet_names} {verb} quiet mode turned on*"
+            # Attach quiet-mode subtext to an existing generated footer.
+            separator = "\n" if custom_template is None and msg.splitlines()[-1].startswith("-# ") else "\n\n"
+            msg += f"{separator}-# *{quiet_names} {verb} quiet mode turned on*"
 
         # Sanitize the complete text before splitting, so long display names
         # cannot overflow batches and each active subscriber is pinged only once.
@@ -657,7 +675,10 @@ class UserCommands(commands.Cog):
             return plain_user_name(uid)
 
         msg = re.sub(r"<@!?(\d+)>", eligible_mention, msg)
-        msg = normalize_ping_footer(msg)
+        # Custom templates retain their authored layout; the default is already
+        # grouped by render_ping_template and must not be re-separated.
+        if custom_template is not None:
+            msg = normalize_ping_footer(msg)
         for message in split_ping_message(msg):
             # A mention in the text does not itself have to trigger a ping.
             # Whitelist only actual subscribers present in THIS batch; the
@@ -847,25 +868,26 @@ class UserCommands(commands.Cog):
             raw_id, raw_name = result
 
         game_id, official_name = await resolve_to_base_game(raw_id, raw_name)
+        formatted_name = await game_mention(game_id, official_name, DB_PATH)
 
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
                 users = await cursor.fetchall()
 
         if not users:
-            await interaction.followup.send(f"No subscribers for **{official_name}**.", ephemeral=not public)
+            await interaction.followup.send(f"No subscribers for {formatted_name}.", ephemeral=not public)
             return
 
         local_mentions = [f"<@{u[0]}>" for u in users if interaction.guild.get_member(u[0])]
         if not local_mentions:
             await interaction.followup.send(
-                f"No users in **{interaction.guild.name}** are subscribed to **{official_name}**.",
+                f"No users in **{interaction.guild.name}** are subscribed to {formatted_name}.",
                 ephemeral=not public
             )
             return
 
         await interaction.followup.send(
-            f"Players in this server interested in **{official_name}** ({len(local_mentions)}):\n{' '.join(local_mentions)}",
+            f"Players in this server interested in {formatted_name} ({len(local_mentions)}):\n{' '.join(local_mentions)}",
             ephemeral=not public,
             allowed_mentions=discord.AllowedMentions.none()
         )
@@ -948,6 +970,7 @@ class UserCommands(commands.Cog):
 
         # Safe field extractions
         title = game_data.get("name", "Unknown Title")
+        formatted_game="Unknown Title"
         summary = game_data.get("summary", "No description available.")
         rating = f"{round(game_data['rating'])}%" if game_data.get("rating") else "N/A"
         url = game_data.get("url", "")
@@ -973,6 +996,7 @@ class UserCommands(commands.Cog):
         subscriber_count = 0
         if interaction.guild and "id" in game_data:
             game_id, _ = await resolve_to_base_game(game_data["id"], title)
+            formatted_game = await game_mention(game_id, title, DB_PATH)
             async with aiosqlite.connect(DB_PATH) as db:
                 async with db.execute("SELECT user_id FROM subscriptions WHERE game_id = ?", (game_id,)) as cursor:
                     rows = await cursor.fetchall()
@@ -993,6 +1017,7 @@ class UserCommands(commands.Cog):
         embed.add_field(name="📅 Release Date", value=release_date, inline=True)
         embed.add_field(name="💻 Platforms", value=platforms, inline=True)
         embed.add_field(name="👥 Subscribers in Server", value=str(subscriber_count), inline=True)
+        embed.add_field(name="🎩 Discord Mention", value=formatted_game, inline=True)
         embed.set_footer(text="Data provided by IGDB")
 
         view = GameInfoSubscribeView(game_id=game_id, game_name=title, db=db, cursor=cursor)
